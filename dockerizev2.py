@@ -3,32 +3,30 @@
 ccdc_integrity_tool.py
 
 A comprehensive tool for CCDC-style environments that:
-  1. Installs & configures a container matching the detected OS.
-     - The container is run as a non-root user and in read-only mode.
-     - Use this mode to build your service inside a container that mirrors the legacy OS.
-  2. Continuously performs integrity checks on a running container.
-     - It periodically computes a hash of the container’s filesystem.
-     - If changes are detected, the container is restored from a pre-saved snapshot (.tar file).
-  3. Deploys a container with an integrated ModSecurity WAF.
-     - A dedicated reverse-proxy container (with ModSecurity enabled) is launched alongside the main container.
-     - The two containers are connected via a Docker network so that the proxy forwards traffic to the main container.
-     
+
+1. Installs & configures a container matching the detected OS.
+   - Runs as a non-root user and in read-only mode.
+   - Use this mode to build/migrate your service inside a container that mirrors the legacy OS.
+
+2. Continuously performs integrity checks on a running container.
+   - Computes a hash of the container's filesystem periodically.
+   - If modifications are detected, restores the container from a snapshot (.tar file).
+
+3. Deploys a web container with an integrated ModSecurity WAF.
+   - Launches two containers on a dedicated network: a web container (e.g. Juice Shop) and a reverse-proxy container with ModSecurity.
+   - The proxy forwards traffic (on host port 80) to the web container (on port 3000).
+
 Usage (Interactive Menu):
   Run the script with the '--menu' flag:
     python3 ccdc_integrity_tool.py --menu
 
-Then choose one of:
-  1. Install & Configure Container
-  2. Run Continuous Integrity Check
-  3. Deploy Container with ModSecurity WAF Integration
-
 Requirements:
   - Python 3.7+
-  - Docker Engine installed (preferably Docker CE rather than Docker Desktop if strict UID mapping is needed)
+  - Docker Engine installed (preferably Docker CE rather than Docker Desktop for strict UID mapping)
   - (Optional) A pre-saved snapshot tar file for restoration in integrity-check mode
-  - A ModSecurity-enabled image (here we use the placeholder "modsecurity/nginx-modsecurity:latest")
+  - A ModSecurity-enabled image (here we use the placeholder "owasp/modsecurity-crs:nginx")
 
-Note: This script is modular and highly customizable. Adjust image names, container names, user names, and network settings as needed.
+Note: Customize image names, container names, and network settings as needed.
 """
 
 import sys
@@ -184,9 +182,9 @@ def pull_docker_image(image):
 
 def run_generic_container(os_name, base_image, container_name="generic_container"):
     """
-    Launch a generic container from the base image with an interactive shell.
+    Launch a generic interactive container from the base image.
     The container is launched in read-only mode and as a non-root user.
-    For Linux, we use the 'nobody' user; for Windows, 'nonroot' is used.
+    For Linux, uses 'nobody'; for Windows, uses 'nonroot'.
     """
     user = "nonroot" if os_name == "windows" else "nobody"
     shell_cmd = "cmd.exe" if os_name == "windows" else "/bin/bash"
@@ -198,7 +196,7 @@ def run_generic_container(os_name, base_image, container_name="generic_container
 
 def compute_container_hash(container_name):
     """
-    Compute a SHA256 hash of the container's filesystem by exporting it and hashing its contents.
+    Compute a SHA256 hash of the container's filesystem by exporting it.
     Returns the hexadecimal hash string.
     """
     try:
@@ -237,8 +235,8 @@ def restore_container_from_snapshot(snapshot_tar, container_name):
 def continuous_integrity_check(container_name, snapshot_tar, check_interval=30):
     """
     Continuously monitor the integrity of a running container.
-    Every 'check_interval' seconds, compute a hash of the container filesystem.
-    If the hash differs from the baseline, restore the container from the snapshot.
+    Every 'check_interval' seconds, compute a hash of the container's filesystem.
+    If the hash differs from the baseline, the container is restored from the snapshot.
     """
     print(f"[INFO] Starting continuous integrity check on container '{container_name}' (interval: {check_interval} seconds).")
     baseline_hash = compute_container_hash(container_name)
@@ -260,81 +258,113 @@ def continuous_integrity_check(container_name, snapshot_tar, check_interval=30):
         print("\n[INFO] Continuous integrity check interrupted by user.")
 
 # -------------------------------
-# 4. ModSecurity WAF Integration
+# 4. Web Container with Integrated ModSecurity WAF Integration
 # -------------------------------
 
-def deploy_with_modsecurity():
+def deploy_web_with_waf():
     """
-    Deploy a pair of containers:
-      - A main container based on the OS-mapped base image (launched as non-root and read-only).
-      - A ModSecurity-enabled reverse proxy container that forwards traffic to the main container.
-      
+    Deploy a web container protected by an integrated ModSecurity WAF.
+    This function launches:
+      - A web container (default: Juice Shop) exposing port 3000 inside the container, mapped to host port 1234.
+      - A ModSecurity-enabled reverse-proxy container using the image 'owasp/modsecurity-crs:nginx'.
+        It is configured with environment variables:
+          PORT: "8080"
+          PROXY: 1
+          BACKEND: http://<web_container_name>:3000
+          MODSEC_RULE_ENGINE: off
+          BLOCKING_PARANOIA: 2
+          TZ: value from the environment or default
+          MODSEC_TMP_DIR: "/tmp"
+          MODSEC_RESP_BODY_ACCESS: "On"
+          MODSEC_RESP_BODY_MIMETYPE: "text/plain text/html text/xml application/json"
+          COMBINED_FILE_SIZES: "65535"
+        The reverse proxy maps its internal port 8080 to host port 80.
     Both containers are attached to a dedicated Docker network.
-    The ModSecurity container uses an environment variable (UPSTREAM_HOST) to know the main container's name.
     """
     check_all_dependencies()
-    # Detect OS and map to base image
-    os_name, version = detect_os()
-    base_image = map_os_to_docker_image(os_name, version)
-    print(f"[INFO] Detected OS: {os_name} (Version: {version}). Main container will use base image: {base_image}")
+    # Define default image names
+    web_image = "bkimminich/juice-shop"
+    waf_image = "owasp/modsecurity-crs:nginx"
     
-    # Pull the required images
-    pull_docker_image(base_image)
-    # Placeholder modsecurity image; you may need to build your own
-    modsec_image = "modsecurity/nginx-modsecurity:latest"
-    pull_docker_image(modsec_image)
+    # Pull required images
+    pull_docker_image(web_image)
+    pull_docker_image(waf_image)
     
-    # Create a dedicated Docker network (if not exists)
-    network_name = "ccdc-net"
+    # Create a dedicated network for web and WAF containers
+    network_name = "ccdc-web-net"
     try:
-        subprocess.check_call(["docker", "network", "inspect", network_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.check_call(["docker", "network", "inspect", network_name],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         print(f"[INFO] Docker network '{network_name}' already exists.")
     except subprocess.CalledProcessError:
         print(f"[INFO] Creating Docker network '{network_name}'.")
         subprocess.check_call(["docker", "network", "create", network_name])
     
-    # Set container names and host port mapping
-    main_container = input("Enter main container name (default 'main_app'): ").strip() or "main_app"
-    modsec_container = input("Enter ModSecurity proxy container name (default 'modsec_proxy'): ").strip() or "modsec_proxy"
-    host_port = input("Enter host port for proxy (default 8080): ").strip() or "8080"
+    # Get user inputs (with defaults)
+    web_container = input("Enter the web container name (default 'juice-shop'): ").strip() or "juice-shop"
+    waf_container = input("Enter the ModSecurity proxy container name (default 'modsec2-nginx'): ").strip() or "modsec2-nginx"
+    host_web_port = input("Enter host port for web container (default '1234'): ").strip() or "1234"
+    host_waf_port = input("Enter host port for WAF (default '80'): ").strip() or "80"
+    tz = os.environ.get("TZ", "UTC")
     
-    # Choose user: use 'nonroot' on Windows, 'nobody' on Linux
-    user = "nonroot" if os_name == "windows" else "nobody"
-    
-    # Launch the main container in detached mode, non-root, read-only, on the dedicated network.
+    # Launch web container in detached mode (non-root, read-only)
+    user = "nonroot" if platform.system().lower() == "windows" else "nobody"
     try:
-        print(f"[INFO] Launching main container '{main_container}' from image '{base_image}'...")
+        print(f"[INFO] Launching web container '{web_container}' from image '{web_image}'...")
         subprocess.check_call([
             "docker", "run", "-d",
             "--read-only",
             "--user", user,
-            "--name", main_container,
+            "--name", web_container,
             "--network", network_name,
-            base_image
+            "-p", f"{host_web_port}:3000",
+            web_image
         ])
     except subprocess.CalledProcessError as e:
-        print(f"[ERROR] Could not launch main container '{main_container}': {e}")
+        print(f"[ERROR] Could not launch web container '{web_container}': {e}")
         sys.exit(1)
     
-    # Launch the ModSecurity proxy container.
-    # It is assumed that the modsecurity image is configured to use the environment variable UPSTREAM_HOST.
+    # Set environment variables for the WAF container; BACKEND points to the web container.
+    waf_env = [
+        "PORT=8080",
+        "PROXY=1",
+        f"BACKEND=http://{web_container}:3000",
+        "MODSEC_RULE_ENGINE=off",
+        "BLOCKING_PARANOIA=2",
+        f"TZ={tz}",
+        "MODSEC_TMP_DIR=/tmp",
+        "MODSEC_RESP_BODY_ACCESS=On",
+        "MODSEC_RESP_BODY_MIMETYPE=text/plain text/html text/xml application/json",
+        "COMBINED_FILE_SIZES=65535"
+    ]
+    # Launch the ModSecurity proxy container in detached mode
     try:
-        print(f"[INFO] Launching ModSecurity proxy container '{modsec_container}'...")
+        print(f"[INFO] Launching ModSecurity proxy container '{waf_container}' from image '{waf_image}'...")
         subprocess.check_call([
             "docker", "run", "-d",
             "--read-only",
             "--user", user,
-            "--name", modsec_container,
+            "--name", waf_container,
             "--network", network_name,
-            "-p", f"{host_port}:80",
-            "--env", f"UPSTREAM_HOST={main_container}",
-            modsec_image
+            "-p", f"{host_waf_port}:8080",
+            "--env", waf_env[0],
+            "--env", waf_env[1],
+            "--env", waf_env[2],
+            "--env", waf_env[3],
+            "--env", waf_env[4],
+            "--env", waf_env[5],
+            "--env", waf_env[6],
+            "--env", waf_env[7],
+            "--env", waf_env[8],
+            "--env", waf_env[9],
+            waf_image
         ])
     except subprocess.CalledProcessError as e:
-        print(f"[ERROR] Could not launch ModSecurity proxy container '{modsec_container}': {e}")
+        print(f"[ERROR] Could not launch ModSecurity proxy container '{waf_container}': {e}")
         sys.exit(1)
     
-    print(f"[INFO] Deployment complete. Your ModSecurity-enabled proxy is listening on host port {host_port} and forwarding to '{main_container}'.")
+    print(f"[INFO] Deployment complete. The web container '{web_container}' is running (port 3000 internally, mapped to host port {host_web_port}).")
+    print(f"[INFO] The ModSecurity-enabled proxy '{waf_container}' is listening on host port {host_waf_port} and forwarding to '{web_container}:3000'.")
 
 # -------------------------------
 # 5. Interactive Menu Interface
@@ -346,7 +376,7 @@ def interactive_menu():
     print("Select an option:")
     print("1. Install & Configure Container")
     print("2. Run Continuous Integrity Check")
-    print("3. Deploy Container with ModSecurity WAF Integration")
+    print("3. Deploy Web Container with Integrated ModSecurity WAF")
     choice = input("Enter your choice (1/2/3): ").strip()
     if choice == "1":
         print("[MODE 1] Installing & Configuring Container...")
@@ -383,8 +413,8 @@ def interactive_menu():
             sys.exit(1)
         continuous_integrity_check(container_name, snapshot_tar, check_interval)
     elif choice == "3":
-        print("[MODE 3] Deploying Container with ModSecurity WAF Integration...")
-        deploy_with_modsecurity()
+        print("[MODE 3] Deploying Web Container with Integrated ModSecurity WAF...")
+        deploy_web_with_waf()
     else:
         print("[ERROR] Invalid option. Exiting.")
         sys.exit(1)
@@ -395,7 +425,7 @@ def interactive_menu():
 
 def main():
     parser = argparse.ArgumentParser(
-        description="CCDC OS-to-Container & Integrity Tool: Map legacy OS to container, perform continuous integrity checks, and integrate ModSecurity WAF."
+        description="CCDC OS-to-Container & Integrity Tool: Map legacy OS to container, perform integrity checks, and integrate ModSecurity WAF for web containers."
     )
     parser.add_argument("--menu", action="store_true", help="Launch interactive menu")
     args = parser.parse_args()
