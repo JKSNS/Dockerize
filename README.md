@@ -5,7 +5,6 @@ Just testing...
 ### Running the Script
 
 - To simply pull the base image based on your host OS, run the script without arguments.
-- To run a service container, for example an FTP container, use:  
   ```bash
   python3 dockerizev2.py --menu
   ```
