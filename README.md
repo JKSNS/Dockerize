@@ -9,8 +9,6 @@ Just testing...
   python3 dockerizev2.py --menu
   ```
 
-This example can be extended with additional logic (such as scanning for multiple configuration files, automating more complex containerization workflows, or integrating with tools like Move2Kube) as needed for a comprehensive CCDC environment.
-
 <br>
 <br>
 <br>
