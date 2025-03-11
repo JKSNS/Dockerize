@@ -582,13 +582,18 @@ def deploy_ecomm_container():
             sys.exit(1)
     
     # Ask for directories to mount (for configuration file integration)
-    dirs_input = input("Enter directories to mount into the container (comma-separated, e.g., /var/www/html,/etc/apache2) or leave blank: ").strip()
-    volume_opts = []
-    if dirs_input:
-        dirs = [d.strip() for d in dirs_input.split(",") if d.strip()]
-        for d in dirs:
-            volume_opts.extend(["-v", f"{d}:{d}"])
-    
+    print("Enter the directories you want to mount into the container, one at a time.")
+    print("Leave this blank and press Enter when you're finished.")
+    while True:
+        dir_input = input("Directory to mount (blank to finish): ").strip()
+        if not dir_input:
+            # User pressed Enter on a blank line, stop collecting directories
+            break
+        # Optionally validate the path here, if needed
+        # For example, check if the directory exists, or if it's an absolute path
+        volume_opts.extend(["-v", f"{dir_input}:{dir_input}"])
+
+# Now volume_opts contains the -v mappings for each directory entered
     # Build the docker run command for the service container
     cmd = [
         "docker", "run", "-d",
