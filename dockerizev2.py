@@ -22,10 +22,11 @@ Usage (Interactive Menu):
     python3 ccdc_integrity_tool.py --menu
 
 Notes:
-  - On the first run, if Docker is missing or the user is not in the 'docker' group, 
-    the script tries to fix this automatically by installing Docker, adding the user to 'docker', 
-    starting Docker, and re-executing itself via 'newgrp docker'.
-  - This re-execution uses an environment variable to avoid infinite loops.
+  - If Docker is missing or the user can’t run `docker`, the script tries to fix it automatically:
+    * Installs Docker (best-effort) on Linux, BSD, or Nix
+    * Adds the user to the 'docker' group
+    * Re-executes itself under `sg docker -c "..."` so the group membership is effective
+  - This avoids dropping you into a new shell prompt as `newgrp` does.
   - The logic is best-effort and may fail on less common distros or OSes.
 """
 
@@ -108,37 +109,6 @@ def attempt_install_docker_nix():
         print(f"[ERROR] Auto-installation of Docker on Nix failed: {e}")
         return False
 
-def fix_docker_group():
-    """
-    Attempt to add the current user to the 'docker' group, enable & start Docker service,
-    and then re-exec the script under 'newgrp docker' so the group membership is effective.
-    """
-    try:
-        current_user = os.getlogin()
-    except Exception:
-        current_user = os.environ.get("USER", "unknown")
-
-    print(f"[INFO] Adding user '{current_user}' to docker group.")
-    try:
-        subprocess.check_call(["sudo", "usermod", "-aG", "docker", current_user])
-    except subprocess.CalledProcessError as e:
-        print(f"[WARN] Could not add user to docker group: {e}")
-
-    # Attempt to enable/start Docker on Linux
-    if platform.system().lower().startswith("linux"):
-        try:
-            subprocess.check_call(["sudo", "systemctl", "enable", "docker"])
-            subprocess.check_call(["sudo", "systemctl", "start", "docker"])
-        except subprocess.CalledProcessError as e:
-            print(f"[WARN] Could not enable/start docker service: {e}")
-
-    # Re-exec with new group membership
-    print("[INFO] Re-executing script under 'newgrp docker' to activate group membership.")
-    os.environ["CCDC_DOCKER_GROUP_FIX"] = "1"  # Avoid infinite loops
-    # Build new command
-    cmd = ["newgrp", "docker", "--", sys.executable] + sys.argv
-    os.execvp("newgrp", cmd)
-
 def can_run_docker():
     """Return True if we can run 'docker ps' without error, else False."""
     try:
@@ -147,38 +117,69 @@ def can_run_docker():
     except:
         return False
 
+def fix_docker_group():
+    """
+    Attempt to add the current user to the 'docker' group, enable & start Docker,
+    then re-exec the script under `sg docker -c "..."`.
+    """
+    try:
+        current_user = os.getlogin()
+    except:
+        current_user = os.environ.get("USER", "unknown")
+    print(f"[INFO] Adding user '{current_user}' to docker group.")
+    try:
+        subprocess.check_call(["sudo", "usermod", "-aG", "docker", current_user])
+    except subprocess.CalledProcessError as e:
+        print(f"[WARN] Could not add user to docker group: {e}")
+
+    # On Linux, attempt to enable/start Docker
+    if platform.system().lower().startswith("linux"):
+        try:
+            subprocess.check_call(["sudo", "systemctl", "enable", "docker"])
+            subprocess.check_call(["sudo", "systemctl", "start", "docker"])
+        except subprocess.CalledProcessError as e:
+            print(f"[WARN] Could not enable/start docker service: {e}")
+
+    # Re-exec with 'sg docker' to avoid dropping user into an interactive shell
+    print("[INFO] Re-executing script under 'sg docker' to activate group membership.")
+    os.environ["CCDC_DOCKER_GROUP_FIX"] = "1"  # Avoid infinite loops
+    script_path = os.path.abspath(sys.argv[0])
+    script_args = sys.argv[1:]
+    # Build a command line to pass to sg
+    # We'll also pass environment variable to skip redoing group fix
+    # e.g. "export CCDC_DOCKER_GROUP_FIX=1 && python3 /path/to/script --menu"
+    command_line = f'export CCDC_DOCKER_GROUP_FIX=1; exec "{sys.executable}" "{script_path}" ' + " ".join(f'"{arg}"' for arg in script_args)
+    cmd = ["sg", "docker", "-c", command_line]
+    os.execvp("sg", cmd)
+
 def ensure_docker_installed():
     """
     Check if Docker is installed & if the user can run it.
-    If missing, attempt auto-install. If the user isn't in docker group, fix that, then re-exec.
+    If missing, attempt auto-install. If the user isn't in docker group, fix that, then re-exec with sg.
     """
-    # If the script already re-executed once, skip re-adding user
     if "CCDC_DOCKER_GROUP_FIX" in os.environ:
-        # Already tried group fix. Let's see if we can run docker now.
+        # Already tried group fix once. Let's see if we can run docker now.
         if can_run_docker():
-            print("[INFO] Docker is accessible now.")
+            print("[INFO] Docker is accessible now after group fix.")
             return
         else:
             print("[ERROR] Docker still not accessible even after group fix. Exiting.")
             sys.exit(1)
 
-    # Check if 'docker' is present
     docker_path = shutil.which("docker")
     if docker_path and can_run_docker():
         print("[INFO] Docker is installed and accessible.")
         return
 
-    # If not installed or not accessible, try installing or fix
+    # If not installed or not accessible, try installing
     sysname = platform.system().lower()
     if sysname.startswith("linux"):
-        # Attempt install
         installed = attempt_install_docker_linux()
         if not installed:
             print("[ERROR] Could not auto-install Docker on Linux. Please install it manually.")
             sys.exit(1)
-        # Check if we can run docker now
+        # Now see if we can run docker
         if not can_run_docker():
-            # Possibly user not in docker group
             fix_docker_group()
         else:
             print("[INFO] Docker is installed and accessible on Linux now.")
@@ -204,7 +205,7 @@ def ensure_docker_installed():
         print("[ERROR] Docker not found, and auto-install is not supported on Windows. Please install Docker or Docker Desktop manually.")
         sys.exit(1)
     else:
-        print(f"[ERROR] Unrecognized system '{sysname}'. Docker is missing. Please install manually.")
+        print(f"[ERROR] Unrecognized system '{sysname}'. Docker is missing. Please install it manually.")
         sys.exit(1)
 
 # -------------------------------------------------
@@ -222,7 +223,7 @@ def check_python_version(min_major=3, min_minor=7):
 def check_docker_compose():
     """Check if Docker Compose is installed (warn if not)."""
     try:
-        subprocess.check_call(["docker-compose", "--version"], stdout=subprocess.DEVNULL)
+        subprocess.check_call(["docker-compose", "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         print("[INFO] Docker Compose is installed.")
     except Exception:
         print("[WARN] Docker Compose not found. Some orchestration features may be unavailable.")
@@ -231,7 +232,7 @@ def check_wsl_if_windows():
     """On Windows, check for WSL if needed (for non-Docker Desktop)."""
     if platform.system().lower() == "windows":
         try:
-            subprocess.check_call(["wsl", "--version"], stdout=subprocess.DEVNULL)
+            subprocess.check_call(["wsl", "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             print("[INFO] WSL is installed.")
         except Exception:
             print("[WARN] WSL not found. Running Docker containers as non-root on legacy Windows may require custom images.")
@@ -239,7 +240,7 @@ def check_wsl_if_windows():
 def check_all_dependencies():
     """Run all prerequisite checks."""
     check_python_version(3, 7)
-    ensure_docker_installed()  # If Docker is missing or user not in group, fix it
+    ensure_docker_installed()
     check_docker_compose()
     check_wsl_if_windows()
 
@@ -248,9 +249,7 @@ def check_all_dependencies():
 # -------------------------------------------------
 
 def detect_os():
-    """
-    Detect the host OS and version.
-    """
+    """Detect the host OS and version. Best-effort for Linux, BSD, Nix, Windows."""
     sysname = platform.system().lower()
     if sysname.startswith("linux"):
         try:
@@ -271,17 +270,13 @@ def detect_os():
     elif "nix" in sysname:
         return "nix", ""
     elif sysname == "windows":
-        # e.g. version might be '10', '2019', etc.
         version = platform.release().lower()
         return "windows", version
     else:
         return sysname, ""
 
 def map_os_to_docker_image(os_name, version):
-    """
-    Map the detected OS to a recommended Docker base image.
-    This is best-effort. For unknown OS, default to 'ubuntu:latest'.
-    """
+    """Map the detected OS to a recommended Docker base image (best-effort)."""
     linux_map = {
         "centos": {"6": "centos:6", "7": "centos:7", "8": "centos:8", "9": "centos:stream9", "": "ubuntu:latest"},
         "ubuntu": {"14": "ubuntu:14.04", "16": "ubuntu:16.04", "18": "ubuntu:18.04", "20": "ubuntu:20.04", "22": "ubuntu:22.04"},
@@ -302,22 +297,17 @@ def map_os_to_docker_image(os_name, version):
         "2019":    "mcr.microsoft.com/windows/servercore:ltsc2019",
         "2022":    "mcr.microsoft.com/windows/servercore:ltsc2022"
     }
-
     if os_name == "bsd":
-        # We'll pick 'alpine' by default for BSD
         return "alpine:latest"
     elif os_name == "nix":
-        # We'll pick 'alpine' by default for Nix
         return "alpine:latest"
     elif os_name == "windows":
-        # Attempt to match a known version
         for k, img in windows_map.items():
             if k in version:
                 return img
         return "mcr.microsoft.com/windows/servercore:ltsc2019"
     else:
-        # Assume some form of Linux with /etc/os-release
-        # We'll parse 'os_name' for known distros
+        # assume some Linux distro
         for distro, ver_map in linux_map.items():
             if distro in os_name:
                 short_ver = version.split(".")[0] if version else ""
@@ -342,10 +332,7 @@ def pull_docker_image(image):
         print(f"[ERROR] Could not pull image '{image}': {e}")
 
 def run_generic_container(os_name, base_image, container_name="generic_container"):
-    """
-    Launch a generic interactive container from the base image.
-    The container is launched in read-only mode and as a non-root user.
-    """
+    """Launch a generic interactive container from the base image in read-only mode, non-root."""
     user = "nonroot" if os_name == "windows" else "nobody"
     shell_cmd = "cmd.exe" if os_name == "windows" else "/bin/bash"
     try:
@@ -362,10 +349,7 @@ def run_generic_container(os_name, base_image, container_name="generic_container
         print(f"[ERROR] Could not launch container '{container_name}': {e}")
 
 def compute_container_hash(container_name):
-    """
-    Compute a SHA256 hash of the container's filesystem by exporting it.
-    Returns the hex digest or None on error.
-    """
+    """Compute a SHA256 hash of the container's filesystem by exporting it."""
     try:
         proc = subprocess.Popen(["docker", "export", container_name], stdout=subprocess.PIPE)
         hasher = hashlib.sha256()
@@ -384,10 +368,7 @@ def compute_container_hash(container_name):
         return None
 
 def restore_container_from_snapshot(snapshot_tar, container_name):
-    """
-    Restore a container from a snapshot tar file.
-    Loads the snapshot image and re-launches the container in detached mode.
-    """
+    """Restore a container from a snapshot tar file in detached mode."""
     try:
         print(f"[INFO] Restoring container '{container_name}' from snapshot '{snapshot_tar}'")
         subprocess.check_call(["docker", "load", "-i", snapshot_tar])
@@ -400,10 +381,7 @@ def restore_container_from_snapshot(snapshot_tar, container_name):
         print(f"[ERROR] Could not restore container '{container_name}' from snapshot: {e}")
 
 def continuous_integrity_check(container_name, snapshot_tar, check_interval=30):
-    """
-    Continuously monitor the integrity of a running container.
-    If the hash changes, restore from snapshot.
-    """
+    """Continuously monitor the integrity of a running container."""
     print(f"[INFO] Starting continuous integrity check on container '{container_name}' (interval: {check_interval} seconds).")
     baseline_hash = compute_container_hash(container_name)
     if not baseline_hash:
@@ -589,7 +567,7 @@ def interactive_menu():
 
 def main():
     parser = argparse.ArgumentParser(
-        description="CCDC OS-to-Container & Integrity Tool: Auto-installs Docker if missing, matches OS for container, integrates WAF."
+        description="CCDC OS-to-Container & Integrity Tool: auto-installs Docker if missing, matches OS for container, integrates WAF."
     )
     parser.add_argument("--menu", action="store_true", help="Launch interactive menu")
     args = parser.parse_args()
