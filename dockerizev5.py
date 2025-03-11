@@ -537,7 +537,7 @@ def deploy_web_stack():
     print("Leave this blank and press Enter when you're finished.")
     volume_opts = []
     while True:
-        dir_input = input("Directory to mount (blank to finish): ").strip()
+        dir_input = input("Directories to mount into the container (blank to finish): ").strip()
         if not dir_input:
             break
         # For each directory, mount it at the same path inside the container
