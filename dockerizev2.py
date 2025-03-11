@@ -331,7 +331,7 @@ def pull_docker_image(image):
     except subprocess.CalledProcessError as e:
         print(f"[ERROR] Could not pull image '{image}': {e}")
 
-def run_generic_container(os_name, base_image, container_name="generic_container"):
+def run_generic_container(os_name, base_image, container_name="megatron"):
     """Launch a generic interactive container from the base image in read-only mode, non-root."""
     user = "nonroot" if os_name == "windows" else "nobody"
     shell_cmd = "cmd.exe" if os_name == "windows" else "/bin/bash"
