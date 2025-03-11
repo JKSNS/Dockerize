@@ -14,23 +14,19 @@ A comprehensive tool for CCDC-style environments that:
 
 3. Deploys a web container (matching the host OS) with an integrated ModSecurity WAF.
    - The script detects the OS and picks a matching Docker base image for the "web" container.
-   - It tries to run a minimal built-in web server if possible (Python http.server, busybox httpd, or Windows PowerShell).
-   - A ModSecurity-enabled reverse proxy container is also launched to forward traffic from host port 80 to the web container's port.
+   - Attempts to run a minimal built-in web server in read-only mode (best-effort).
+   - Launches a ModSecurity-enabled reverse proxy container as well.
 
 Usage (Interactive Menu):
   Run the script with the '--menu' flag:
     python3 ccdc_integrity_tool.py --menu
 
-Requirements:
-  - Python 3.7+
-  - If Docker is missing, the script attempts to install it automatically on Linux, BSD, or Nix. 
-  - (Optional) A pre-saved snapshot tar file for restoration in integrity-check mode
-  - A ModSecurity-enabled image (here we use the placeholder "owasp/modsecurity-crs:nginx")
-
 Notes:
-  - The script is best-effort for auto-installing Docker on various distros. 
-  - Matching an OS-based container with a built-in web server in read-only mode can fail if needed packages are missing.
-  - You can remove the `--read-only` flag if ephemeral installation of packages is required inside the container.
+  - On the first run, if Docker is missing or the user is not in the 'docker' group, 
+    the script tries to fix this automatically by installing Docker, adding the user to 'docker', 
+    starting Docker, and re-executing itself via 'newgrp docker'.
+  - This re-execution uses an environment variable to avoid infinite loops.
+  - The logic is best-effort and may fail on less common distros or OSes.
 """
 
 import sys
@@ -42,9 +38,9 @@ import hashlib
 import time
 import shutil
 
-# -------------------------------
-# 1. Docker Auto-Installation Logic
-# -------------------------------
+# -------------------------------------------------
+# 1. Docker Auto-Installation & Group-Fix Logic
+# -------------------------------------------------
 
 def detect_linux_package_manager():
     """Detect common Linux package managers."""
@@ -54,29 +50,22 @@ def detect_linux_package_manager():
     return None
 
 def attempt_install_docker_linux():
-    """
-    Attempt to install Docker on Linux using a best-effort approach.
-    This function requires sudo privileges.
-    """
+    """Attempt to install Docker on Linux using a best-effort approach."""
     pm = detect_linux_package_manager()
     if not pm:
         print("[ERROR] No recognized package manager found on Linux. Cannot auto-install Docker.")
         return False
 
     print(f"[INFO] Attempting to install Docker using '{pm}' on Linux...")
-
     try:
         if pm in ("apt", "apt-get"):
-            # Minimal example for Debian/Ubuntu
             subprocess.check_call(["sudo", pm, "update", "-y"])
             subprocess.check_call(["sudo", pm, "install", "-y", "docker.io"])
         elif pm in ("yum", "dnf"):
-            # Minimal example for RHEL/CentOS
             subprocess.check_call(["sudo", pm, "-y", "install", "docker"])
             subprocess.check_call(["sudo", "systemctl", "enable", "docker"])
             subprocess.check_call(["sudo", "systemctl", "start", "docker"])
         elif pm == "zypper":
-            # Minimal example for openSUSE
             subprocess.check_call(["sudo", "zypper", "refresh"])
             subprocess.check_call(["sudo", "zypper", "--non-interactive", "install", "docker"])
             subprocess.check_call(["sudo", "systemctl", "enable", "docker"])
@@ -91,10 +80,7 @@ def attempt_install_docker_linux():
         return False
 
 def attempt_install_docker_bsd():
-    """
-    Attempt to install Docker on *BSD using a best-effort approach with 'pkg'.
-    Docker on BSD is not officially supported in many cases, so this may fail.
-    """
+    """Attempt to install Docker on BSD using 'pkg' (best-effort)."""
     pkg_path = shutil.which("pkg")
     if not pkg_path:
         print("[ERROR] 'pkg' not found. Cannot auto-install Docker on BSD.")
@@ -102,19 +88,14 @@ def attempt_install_docker_bsd():
     print("[INFO] Attempting to install Docker using 'pkg' on BSD (best-effort).")
     try:
         subprocess.check_call(["sudo", "pkg", "update"])
-        # Some BSD variants do not have official Docker packages, but let's do a best-effort
         subprocess.check_call(["sudo", "pkg", "install", "-y", "docker"])
-        print("[INFO] Docker installation attempt completed for BSD. Checking if Docker is now available.")
         return True
     except subprocess.CalledProcessError as e:
         print(f"[ERROR] Auto-installation of Docker on BSD failed: {e}")
         return False
 
 def attempt_install_docker_nix():
-    """
-    Attempt to install Docker on NixOS or Nix-based systems using 'nix-env -i docker'.
-    This is highly experimental and may require extra config in /etc/nixos/configuration.nix.
-    """
+    """Attempt to install Docker on Nix-based systems using 'nix-env -i docker' (very best-effort)."""
     nixenv_path = shutil.which("nix-env")
     if not nixenv_path:
         print("[ERROR] 'nix-env' not found. Cannot auto-install Docker on Nix.")
@@ -122,84 +103,113 @@ def attempt_install_docker_nix():
     print("[INFO] Attempting to install Docker using 'nix-env -i docker' on Nix.")
     try:
         subprocess.check_call(["sudo", "nix-env", "-i", "docker"])
-        # Additional steps might be needed to enable the Docker daemon on NixOS
-        # Typically you'd configure `services.docker.enable = true;` in /etc/nixos/configuration.nix
-        print("[INFO] Docker installation attempt completed for Nix. Checking if Docker is now available.")
         return True
     except subprocess.CalledProcessError as e:
         print(f"[ERROR] Auto-installation of Docker on Nix failed: {e}")
         return False
 
+def fix_docker_group():
+    """
+    Attempt to add the current user to the 'docker' group, enable & start Docker service,
+    and then re-exec the script under 'newgrp docker' so the group membership is effective.
+    """
+    try:
+        current_user = os.getlogin()
+    except Exception:
+        current_user = os.environ.get("USER", "unknown")
+
+    print(f"[INFO] Adding user '{current_user}' to docker group.")
+    try:
+        subprocess.check_call(["sudo", "usermod", "-aG", "docker", current_user])
+    except subprocess.CalledProcessError as e:
+        print(f"[WARN] Could not add user to docker group: {e}")
+
+    # Attempt to enable/start Docker on Linux
+    if platform.system().lower().startswith("linux"):
+        try:
+            subprocess.check_call(["sudo", "systemctl", "enable", "docker"])
+            subprocess.check_call(["sudo", "systemctl", "start", "docker"])
+        except subprocess.CalledProcessError as e:
+            print(f"[WARN] Could not enable/start docker service: {e}")
+
+    # Re-exec with new group membership
+    print("[INFO] Re-executing script under 'newgrp docker' to activate group membership.")
+    os.environ["CCDC_DOCKER_GROUP_FIX"] = "1"  # Avoid infinite loops
+    # Build new command
+    cmd = ["newgrp", "docker", "--", sys.executable] + sys.argv
+    os.execvp("newgrp", cmd)
+
+def can_run_docker():
+    """Return True if we can run 'docker ps' without error, else False."""
+    try:
+        subprocess.check_call(["docker", "ps"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except:
+        return False
+
 def ensure_docker_installed():
     """
-    Check if Docker is installed. If not, attempt to auto-install on Linux, BSD, or Nix.
-    If the script cannot install Docker, it exits with an error.
+    Check if Docker is installed & if the user can run it.
+    If missing, attempt auto-install. If the user isn't in docker group, fix that, then re-exec.
     """
+    # If the script already re-executed once, skip re-adding user
+    if "CCDC_DOCKER_GROUP_FIX" in os.environ:
+        # Already tried group fix. Let's see if we can run docker now.
+        if can_run_docker():
+            print("[INFO] Docker is accessible now.")
+            return
+        else:
+            print("[ERROR] Docker still not accessible even after group fix. Exiting.")
+            sys.exit(1)
+
+    # Check if 'docker' is present
     docker_path = shutil.which("docker")
-    if docker_path:
-        print("[INFO] Docker appears to be installed.")
+    if docker_path and can_run_docker():
+        print("[INFO] Docker is installed and accessible.")
         return
 
-    # Check platform
+    # If not installed or not accessible, try installing or fix
     sysname = platform.system().lower()
     if sysname.startswith("linux"):
-        # Attempt normal Linux install
-        success = attempt_install_docker_linux()
-        if not success:
-            # Maybe it's a Nix-based system
-            # We'll do a naive approach: if /etc/os-release has "nixos", try attempt_install_docker_nix
-            try:
-                with open("/etc/os-release") as f:
-                    content = f.read().lower()
-                if "nixos" in content:
-                    print("[INFO] Detected possible NixOS. Trying Nix-based install.")
-                    success = attempt_install_docker_nix()
-                else:
-                    # Try a fallback approach?
-                    pass
-            except:
-                pass
-        if not success:
+        # Attempt install
+        installed = attempt_install_docker_linux()
+        if not installed:
             print("[ERROR] Could not auto-install Docker on Linux. Please install it manually.")
             sys.exit(1)
-        docker_path = shutil.which("docker")
-        if not docker_path:
-            print("[ERROR] Docker still not found after auto-install attempt.")
-            sys.exit(1)
-        print("[INFO] Docker is now installed on Linux.")
+        # Check if we can run docker now
+        if not can_run_docker():
+            # Possibly user not in docker group
+            fix_docker_group()
+        else:
+            print("[INFO] Docker is installed and accessible on Linux now.")
     elif "bsd" in sysname:
-        # Attempt to install with pkg
-        success = attempt_install_docker_bsd()
-        if not success:
+        installed = attempt_install_docker_bsd()
+        if not installed:
             print("[ERROR] Could not auto-install Docker on BSD. Please install it manually.")
             sys.exit(1)
-        docker_path = shutil.which("docker")
-        if not docker_path:
-            print("[ERROR] Docker still not found after auto-install attempt on BSD.")
-            sys.exit(1)
-        print("[INFO] Docker is now installed on BSD.")
+        if not can_run_docker():
+            fix_docker_group()
+        else:
+            print("[INFO] Docker is installed and accessible on BSD now.")
     elif "nix" in sysname:
-        # Attempt direct Nix approach
-        success = attempt_install_docker_nix()
-        if not success:
-            print("[ERROR] Could not auto-install Docker on Nix. Please install it manually.")
+        installed = attempt_install_docker_nix()
+        if not installed:
+            print("[ERROR] Could not auto-install Docker on Nix. Please install manually.")
             sys.exit(1)
-        docker_path = shutil.which("docker")
-        if not docker_path:
-            print("[ERROR] Docker still not found after auto-install attempt on Nix.")
-            sys.exit(1)
-        print("[INFO] Docker is now installed on Nix.")
+        if not can_run_docker():
+            fix_docker_group()
+        else:
+            print("[INFO] Docker is installed and accessible on Nix now.")
     elif sysname == "windows":
-        # On Windows, we do not attempt auto-install
         print("[ERROR] Docker not found, and auto-install is not supported on Windows. Please install Docker or Docker Desktop manually.")
         sys.exit(1)
     else:
-        print(f"[ERROR] Unrecognized system '{sysname}'. Docker is missing. Please install it manually.")
+        print(f"[ERROR] Unrecognized system '{sysname}'. Docker is missing. Please install manually.")
         sys.exit(1)
 
-# -------------------------------
+# -------------------------------------------------
 # 2. Python & Docker Checks
-# -------------------------------
+# -------------------------------------------------
 
 def check_python_version(min_major=3, min_minor=7):
     """Ensure Python 3.7+ is being used."""
@@ -218,7 +228,7 @@ def check_docker_compose():
         print("[WARN] Docker Compose not found. Some orchestration features may be unavailable.")
 
 def check_wsl_if_windows():
-    """On Windows, check for WSL if needed (for non-Docker Desktop environments)."""
+    """On Windows, check for WSL if needed (for non-Docker Desktop)."""
     if platform.system().lower() == "windows":
         try:
             subprocess.check_call(["wsl", "--version"], stdout=subprocess.DEVNULL)
@@ -229,20 +239,20 @@ def check_wsl_if_windows():
 def check_all_dependencies():
     """Run all prerequisite checks."""
     check_python_version(3, 7)
-    ensure_docker_installed()  # If Docker is missing, try to install automatically
+    ensure_docker_installed()  # If Docker is missing or user not in group, fix it
     check_docker_compose()
     check_wsl_if_windows()
 
-# -------------------------------
-# 3. OS Detection & Mapping
-# -------------------------------
+# -------------------------------------------------
+# 3. OS Detection & Docker Image Mapping
+# -------------------------------------------------
 
 def detect_os():
     """
     Detect the host OS and version.
-    Returns (os_name, version) as lowercase strings.
     """
-    if sys.platform.startswith("linux"):
+    sysname = platform.system().lower()
+    if sysname.startswith("linux"):
         try:
             with open("/etc/os-release") as f:
                 lines = f.readlines()
@@ -254,31 +264,24 @@ def detect_os():
             os_name = os_info.get("name", "linux")
             version_id = os_info.get("version_id", "")
             return os_name, version_id
-        except Exception as e:
-            print(f"[WARN] Could not read /etc/os-release: {e}")
+        except:
             return "linux", ""
-    elif sys.platform.startswith("freebsd") or sys.platform.startswith("openbsd") or sys.platform.startswith("netbsd"):
+    elif sysname.startswith("freebsd") or sysname.startswith("openbsd") or sysname.startswith("netbsd"):
         return "bsd", ""
-    elif "nix" in sys.platform.lower():
+    elif "nix" in sysname:
         return "nix", ""
-    elif sys.platform == "win32":
-        os_name = platform.system().lower()
+    elif sysname == "windows":
+        # e.g. version might be '10', '2019', etc.
         version = platform.release().lower()
-        return os_name, version
+        return "windows", version
     else:
-        # Attempt fallback
-        return platform.system().lower(), ""
+        return sysname, ""
 
 def map_os_to_docker_image(os_name, version):
     """
     Map the detected OS to a recommended Docker base image.
-    For the web container scenario, we try to pick a minimal base image that might have a built-in server.
-    We'll do best-effort. 
+    This is best-effort. For unknown OS, default to 'ubuntu:latest'.
     """
-    # For demonstration, we reuse the same mapping logic as before, but you can customize further.
-    # We disclaim that "matching OS" plus "has built-in web server" is not guaranteed.
-    # We'll do the same mapping as before, but we might choose an Alpine-based or busybox-based image if possible.
-    
     linux_map = {
         "centos": {"6": "centos:6", "7": "centos:7", "8": "centos:8", "9": "centos:stream9", "": "ubuntu:latest"},
         "ubuntu": {"14": "ubuntu:14.04", "16": "ubuntu:16.04", "18": "ubuntu:18.04", "20": "ubuntu:20.04", "22": "ubuntu:22.04"},
@@ -300,32 +303,34 @@ def map_os_to_docker_image(os_name, version):
         "2022":    "mcr.microsoft.com/windows/servercore:ltsc2022"
     }
 
-    # For "bsd" or "nix", let's just default to "alpine:latest" (best-effort).
-    if os_name in ("bsd", "nix"):
+    if os_name == "bsd":
+        # We'll pick 'alpine' by default for BSD
         return "alpine:latest"
-
-    # For standard "windows" approach:
-    if os_name == "windows":
-        for key, img in windows_map.items():
-            if key in version:
+    elif os_name == "nix":
+        # We'll pick 'alpine' by default for Nix
+        return "alpine:latest"
+    elif os_name == "windows":
+        # Attempt to match a known version
+        for k, img in windows_map.items():
+            if k in version:
                 return img
         return "mcr.microsoft.com/windows/servercore:ltsc2019"
+    else:
+        # Assume some form of Linux with /etc/os-release
+        # We'll parse 'os_name' for known distros
+        for distro, ver_map in linux_map.items():
+            if distro in os_name:
+                short_ver = version.split(".")[0] if version else ""
+                if short_ver in ver_map:
+                    return ver_map[short_ver]
+                if "" in ver_map:
+                    return ver_map[""]
+                return "ubuntu:latest"
+        return "ubuntu:latest"
 
-    # Otherwise assume some Linux distribution
-    # Attempt to parse distro name from os_name
-    for distro, ver_map in linux_map.items():
-        if distro in os_name:
-            short_ver = version.split(".")[0] if version else ""
-            if short_ver in ver_map:
-                return ver_map[short_ver]
-            if "" in ver_map:
-                return ver_map[""]
-            return "ubuntu:latest"
-    return "ubuntu:latest"
-
-# -------------------------------
+# -------------------------------------------------
 # 4. Container Launch & Integrity Checking
-# -------------------------------
+# -------------------------------------------------
 
 def pull_docker_image(image):
     """Pull the specified Docker image."""
@@ -340,20 +345,26 @@ def run_generic_container(os_name, base_image, container_name="generic_container
     """
     Launch a generic interactive container from the base image.
     The container is launched in read-only mode and as a non-root user.
-    For Linux, uses 'nobody'; for Windows, uses 'nonroot'.
     """
     user = "nonroot" if os_name == "windows" else "nobody"
     shell_cmd = "cmd.exe" if os_name == "windows" else "/bin/bash"
     try:
         print(f"[INFO] Launching interactive container '{container_name}' from image '{base_image}' as user '{user}' in read-only mode.")
-        subprocess.check_call(["docker", "run", "-it", "--read-only", "--user", user, "--name", container_name, base_image, shell_cmd])
+        subprocess.check_call([
+            "docker", "run", "-it",
+            "--read-only",
+            "--user", user,
+            "--name", container_name,
+            base_image,
+            shell_cmd
+        ])
     except subprocess.CalledProcessError as e:
         print(f"[ERROR] Could not launch container '{container_name}': {e}")
 
 def compute_container_hash(container_name):
     """
     Compute a SHA256 hash of the container's filesystem by exporting it.
-    Returns the hexadecimal hash string.
+    Returns the hex digest or None on error.
     """
     try:
         proc = subprocess.Popen(["docker", "export", container_name], stdout=subprocess.PIPE)
@@ -391,8 +402,7 @@ def restore_container_from_snapshot(snapshot_tar, container_name):
 def continuous_integrity_check(container_name, snapshot_tar, check_interval=30):
     """
     Continuously monitor the integrity of a running container.
-    Every 'check_interval' seconds, compute a hash of the container's filesystem.
-    If the hash differs from the baseline, the container is restored from the snapshot.
+    If the hash changes, restore from snapshot.
     """
     print(f"[INFO] Starting continuous integrity check on container '{container_name}' (interval: {check_interval} seconds).")
     baseline_hash = compute_container_hash(container_name)
@@ -413,16 +423,15 @@ def continuous_integrity_check(container_name, snapshot_tar, check_interval=30):
     except KeyboardInterrupt:
         print("\n[INFO] Continuous integrity check interrupted by user.")
 
-# -------------------------------
+# -------------------------------------------------
 # 5. Web Container with Integrated ModSecurity WAF
-# -------------------------------
+# -------------------------------------------------
 
 def deploy_web_with_waf():
     """
     Deploy a web container (matching host OS) with integrated ModSecurity WAF.
-    1. Detect the OS, map to a base image for the web container.
-    2. Attempt to run a minimal built-in web server if possible (python -m http.server, busybox httpd, etc.).
-    3. Launch a ModSecurity container as reverse proxy on port 80 -> web container's port 8080 (or 80).
+    The web container is a minimal OS-based container that tries to run a built-in web server in read-only mode.
+    The WAF container is 'owasp/modsecurity-crs:nginx'.
     """
     check_all_dependencies()
     
@@ -452,23 +461,13 @@ def deploy_web_with_waf():
     host_web_port = input("Enter host port for the web container (default '8080'): ").strip() or "8080"
     host_waf_port = input("Enter host port for the WAF (default '80'): ").strip() or "80"
     
-    # Attempt to pick a built-in server command based on the base image
-    # We'll guess a minimal approach. If we find python in the base image, we run python -m http.server ...
-    # Otherwise we try busybox httpd, or a Windows powershell approach, etc.
-    # This is best-effort. Real usage might require custom images with pre-installed servers.
-    
+    # Attempt to pick a built-in server command
     user = "nonroot" if os_name == "windows" else "nobody"
-    
-    # Compose a minimal server command:
     if os_name == "windows":
-        # We'll attempt powershell approach
-        # This is purely illustrative
         server_cmd = "powershell.exe -Command \"Write-Host 'Starting minimal web server...'; while($true){echo 'HTTP/1.1 200 OK`r`n`r`nHello from Windows Container' | nc -l -p 80}\""
         container_port = "80"
     else:
-        # On Linux/bsd/nix, try python3 -m http.server 80, fallback to busybox httpd
-        # We'll do python approach first
-        server_cmd = "/bin/sh -c 'which python3 && python3 -m http.server 80 || (which busybox && busybox httpd -f -p 80 || echo \"No built-in server found\" && sleep infinity)'"
+        server_cmd = "/bin/sh -c 'which python3 && python3 -m http.server 80 || (which busybox && busybox httpd -f -p 80 || echo \"No server found\" && sleep infinity)'"
         container_port = "80"
     
     # Launch web container
@@ -530,9 +529,9 @@ def deploy_web_with_waf():
     print(f"[INFO] Deployment complete. The web container '{web_container}' is running on container port {container_port} (mapped to host port {host_web_port}).")
     print(f"[INFO] The ModSecurity proxy '{waf_container}' is listening on host port {host_waf_port} and forwarding to '{web_container}:{container_port}'.")
 
-# -------------------------------
+# -------------------------------------------------
 # 6. Interactive Menu
-# -------------------------------
+# -------------------------------------------------
 
 def interactive_menu():
     """Display an interactive menu for the user to choose an operation."""
@@ -584,13 +583,13 @@ def interactive_menu():
         print("[ERROR] Invalid option. Exiting.")
         sys.exit(1)
 
-# -------------------------------
+# -------------------------------------------------
 # 7. Main Entry Point
-# -------------------------------
+# -------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(
-        description="CCDC OS-to-Container & Integrity Tool: Auto-installs Docker if missing, matches OS for container, and integrates WAF."
+        description="CCDC OS-to-Container & Integrity Tool: Auto-installs Docker if missing, matches OS for container, integrates WAF."
     )
     parser.add_argument("--menu", action="store_true", help="Launch interactive menu")
     args = parser.parse_args()
