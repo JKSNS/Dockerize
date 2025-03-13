@@ -602,7 +602,7 @@ def deploy_modsecurity_waf(network_name, backend_container):
     
     # We won't prompt for read-only by default, since the WAF may need to write logs.
     waf_read_only = input("Should the WAF container run in read-only mode? (y/n) [n]: ").strip().lower() == "y"
-    host_waf_port = input("Enter host port for the WAF (default '80'): ").strip() or "80"
+    host_waf_port = input("Enter host port for the WAF (default '8080'): ").strip() or "8080"
     
     tz = os.environ.get("TZ", "UTC")
     waf_env = [
