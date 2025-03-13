@@ -2,14 +2,11 @@
 """
 ccdc_integrity_tool.py
 
-Major changes:
-1) Option 5 is now labeled "[LEGACY]".
-2) 'Read-only' option truly enforces read-only mode AND runs the container as non-root (on Linux).
-3) A new Option 6 attempts to detect the host OS, pull a matching base image,
-   detect installed packages (Apache, PHP, etc.), install them, and copy relevant directories
-   so that a custom web app can be containerized without using a specialized container image (like PrestaShop).
-
-Adjust as necessary for your environment.
+Key changes:
+- Auto-install Docker Compose on Linux if missing.
+- Force noninteractive package installation (DEBIAN_FRONTEND=noninteractive, TZ=America/Denver)
+  so we don't get stuck at tzdata or other geographic prompts.
+- Everything defaults to US: specifically "America/Denver" for the timezone.
 """
 
 import sys
@@ -22,7 +19,7 @@ import time
 import shutil
 
 # -------------------------------------------------
-# 1. Docker Auto-Installation & Group-Fix Logic
+# 1. Docker & Docker Compose Auto-Installation
 # -------------------------------------------------
 
 def detect_linux_package_manager():
@@ -41,54 +38,65 @@ def attempt_install_docker_linux():
 
     print(f"[INFO] Attempting to install Docker using '{pm}' on Linux...")
     try:
+        env = os.environ.copy()
+        env["DEBIAN_FRONTEND"] = "noninteractive"
+        env["TZ"] = "America/Denver"
+
         if pm in ("apt", "apt-get"):
-            subprocess.check_call(["sudo", pm, "update", "-y"])
-            subprocess.check_call(["sudo", pm, "install", "-y", "docker.io"])
+            subprocess.check_call(["sudo", pm, "update", "-y"], env=env)
+            subprocess.check_call(["sudo", pm, "install", "-y", "docker.io"], env=env)
         elif pm in ("yum", "dnf"):
-            subprocess.check_call(["sudo", pm, "-y", "install", "docker"])
-            subprocess.check_call(["sudo", "systemctl", "enable", "docker"])
-            subprocess.check_call(["sudo", "systemctl", "start", "docker"])
+            subprocess.check_call(["sudo", pm, "-y", "install", "docker"], env=env)
+            subprocess.check_call(["sudo", "systemctl", "enable", "docker"], env=env)
+            subprocess.check_call(["sudo", "systemctl", "start", "docker"], env=env)
         elif pm == "zypper":
-            subprocess.check_call(["sudo", "zypper", "refresh"])
-            subprocess.check_call(["sudo", "zypper", "--non-interactive", "install", "docker"])
-            subprocess.check_call(["sudo", "systemctl", "enable", "docker"])
-            subprocess.check_call(["sudo", "systemctl", "start", "docker"])
+            subprocess.check_call(["sudo", "zypper", "refresh"], env=env)
+            subprocess.check_call(["sudo", "zypper", "--non-interactive", "install", "docker"], env=env)
+            subprocess.check_call(["sudo", "systemctl", "enable", "docker"], env=env)
+            subprocess.check_call(["sudo", "systemctl", "start", "docker"], env=env)
         else:
             print(f"[ERROR] Package manager '{pm}' is not fully supported for auto-installation.")
             return False
+
         print("[INFO] Docker installation attempt completed. Checking if Docker is now available.")
         return True
     except subprocess.CalledProcessError as e:
         print(f"[ERROR] Auto-installation of Docker on Linux failed: {e}")
         return False
 
-def attempt_install_docker_bsd():
-    """Attempt to install Docker on BSD using 'pkg' (best-effort)."""
-    pkg_path = shutil.which("pkg")
-    if not pkg_path:
-        print("[ERROR] 'pkg' not found. Cannot auto-install Docker on BSD.")
+def attempt_install_docker_compose_linux():
+    """
+    Attempt to install Docker Compose on Linux (best effort).
+    We'll try apt-get or yum/dnf or zypper, similar to Docker auto-install logic,
+    also in noninteractive mode with TZ=America/Denver.
+    """
+    pm = detect_linux_package_manager()
+    if not pm:
+        print("[ERROR] No recognized package manager found. Cannot auto-install Docker Compose.")
         return False
-    print("[INFO] Attempting to install Docker using 'pkg' on BSD (best-effort).")
+    
+    print(f"[INFO] Attempting to install Docker Compose using '{pm}' on Linux...")
     try:
-        subprocess.check_call(["sudo", "pkg", "update"])
-        subprocess.check_call(["sudo", "pkg", "install", "-y", "docker"])
-        return True
-    except subprocess.CalledProcessError as e:
-        print(f"[ERROR] Auto-installation of Docker on BSD failed: {e}")
-        return False
+        env = os.environ.copy()
+        env["DEBIAN_FRONTEND"] = "noninteractive"
+        env["TZ"] = "America/Denver"
 
-def attempt_install_docker_nix():
-    """Attempt to install Docker on Nix-based systems using 'nix-env -i docker' (very best-effort)."""
-    nixenv_path = shutil.which("nix-env")
-    if not nixenv_path:
-        print("[ERROR] 'nix-env' not found. Cannot auto-install Docker on Nix.")
-        return False
-    print("[INFO] Attempting to install Docker using 'nix-env -i docker' on Nix.")
-    try:
-        subprocess.check_call(["sudo", "nix-env", "-i", "docker"])
+        if pm in ("apt", "apt-get"):
+            subprocess.check_call(["sudo", pm, "update", "-y"], env=env)
+            subprocess.check_call(["sudo", pm, "install", "-y", "docker-compose"], env=env)
+        elif pm in ("yum", "dnf"):
+            subprocess.check_call(["sudo", pm, "-y", "install", "docker-compose"], env=env)
+        elif pm == "zypper":
+            subprocess.check_call(["sudo", "zypper", "refresh"], env=env)
+            subprocess.check_call(["sudo", "zypper", "--non-interactive", "install", "docker-compose"], env=env)
+        else:
+            print(f"[ERROR] Package manager '{pm}' is not fully supported for Docker Compose auto-install.")
+            return False
+        
+        print("[INFO] Docker Compose installation attempt completed. Checking if it is now available.")
         return True
     except subprocess.CalledProcessError as e:
-        print(f"[ERROR] Auto-installation of Docker on Nix failed: {e}")
+        print(f"[ERROR] Auto-installation of Docker Compose on Linux failed: {e}")
         return False
 
 def can_run_docker():
@@ -161,29 +169,41 @@ def ensure_docker_installed():
         else:
             print("[INFO] Docker is installed and accessible on Linux now.")
     elif "bsd" in sysname:
-        installed = attempt_install_docker_bsd()
-        if not installed:
-            print("[ERROR] Could not auto-install Docker on BSD. Please install it manually.")
-            sys.exit(1)
-        if not can_run_docker():
-            fix_docker_group()
-        else:
-            print("[INFO] Docker is installed and accessible on BSD now.")
+        print("[ERROR] Docker auto-install is not implemented for BSD in this script. Please install manually.")
+        sys.exit(1)
     elif "nix" in sysname:
-        installed = attempt_install_docker_nix()
-        if not installed:
-            print("[ERROR] Could not auto-install Docker on Nix. Please install manually.")
-            sys.exit(1)
-        if not can_run_docker():
-            fix_docker_group()
-        else:
-            print("[INFO] Docker is installed and accessible on Nix now.")
+        print("[ERROR] Docker auto-install is not implemented for Nix in this script. Please install manually.")
+        sys.exit(1)
     elif sysname == "windows":
         print("[ERROR] Docker not found, and auto-install is not supported on Windows. Please install Docker or Docker Desktop manually.")
         sys.exit(1)
     else:
         print(f"[ERROR] Unrecognized system '{sysname}'. Docker is missing. Please install it manually.")
         sys.exit(1)
+
+def check_docker_compose():
+    """Check if Docker Compose is installed. If not, try to auto-install on Linux."""
+    try:
+        subprocess.check_call(["docker-compose", "--version"],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print("[INFO] Docker Compose is installed.")
+    except Exception:
+        print("[WARN] Docker Compose not found. Attempting auto-install (Linux only).")
+        sysname = platform.system().lower()
+        if sysname.startswith("linux"):
+            installed = attempt_install_docker_compose_linux()
+            if installed:
+                try:
+                    # Verify again
+                    subprocess.check_call(["docker-compose", "--version"],
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    print("[INFO] Docker Compose installed successfully.")
+                except:
+                    print("[ERROR] Docker Compose still not available after attempted install.")
+            else:
+                print("[ERROR] Could not auto-install Docker Compose on Linux. Please install manually.")
+        else:
+            print("[ERROR] Docker Compose not found, and auto-install is only supported on Linux. Please install manually.")
 
 # -------------------------------------------------
 # 2. Python & Docker Checks
@@ -196,14 +216,6 @@ def check_python_version(min_major=3, min_minor=7):
         sys.exit(1)
     else:
         print(f"[INFO] Python version check passed: {sys.version_info.major}.{sys.version_info.minor}.")
-
-def check_docker_compose():
-    """Check if Docker Compose is installed (warn if not)."""
-    try:
-        subprocess.check_call(["docker-compose", "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        print("[INFO] Docker Compose is installed.")
-    except Exception:
-        print("[WARN] Docker Compose not found. Some orchestration features may be unavailable.")
 
 def check_wsl_if_windows():
     """On Windows, check for WSL if needed (for non-Docker Desktop)."""
@@ -474,14 +486,12 @@ def prompt_for_container_name(default_name):
 def maybe_apply_read_only_and_nonroot(cmd_list):
     """
     If the user chooses read-only, enforce --read-only and --user nobody (on Linux-like).
-    If on Windows, just do --read-only.
+    If on Windows, just do --read-only. This ensures the container is truly read-only and not root.
     """
     read_only = input("Should this container run in read-only mode? (y/n) [n]: ").strip().lower() == "y"
     if read_only:
         sysname = platform.system().lower()
-        # Always do --read-only
         cmd_list.append("--read-only")
-        # If not Windows, also drop root privileges
         if not sysname.startswith("windows"):
             cmd_list.extend(["--user", "nobody"])
     return cmd_list
@@ -576,7 +586,7 @@ def setup_docker_waf():
     # The user must provide the backend container name or IP
     backend_container = input("Enter the backend container name or IP (default 'web_container'): ").strip() or "web_container"
     
-    tz = os.environ.get("TZ", "UTC")
+    tz = os.environ.get("TZ", "America/Denver")
     waf_env = [
         "PORT=8080",
         "PROXY=1",
@@ -811,7 +821,7 @@ def deploy_modsecurity_waf(network_name, backend_container):
     host_waf_port = input("Enter host port for the WAF (default '8080'): ").strip() or "8080"
     cmd.extend(["-p", f"{host_waf_port}:8080"])
     
-    tz = os.environ.get("TZ", "UTC")
+    tz = os.environ.get("TZ", "America/Denver")
     waf_env = [
         "PORT=8080",
         "PROXY=1",
@@ -844,6 +854,7 @@ def containerize_service():
     Encapsulate the current service (with its dependencies and configuration)
     into a Docker container by copying key directories (/var/www, /var/lib/mysql, /etc/httpd)
     into a build context, generating a Dockerfile, building the image, and optionally running a container.
+    We'll also set DEBIAN_FRONTEND=noninteractive and TZ=America/Denver in the Dockerfile to avoid prompts.
     """
     check_all_dependencies()
     
@@ -878,6 +889,10 @@ def containerize_service():
     # Create a Dockerfile in the build context
     dockerfile_path = os.path.join(build_context, "Dockerfile")
     dockerfile_content = f"""FROM {base_image}
+
+# Avoid interactive tzdata config
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=America/Denver
 
 # Copy service configuration and data
 COPY var_www/ /var/www/
@@ -1008,9 +1023,7 @@ def advanced_os_containerize_service():
     Detect the host OS (e.g., CentOS 7), pull a matching Docker image (e.g., centos:7),
     detect key installed packages (Apache, PHP, MariaDB, etc.) on the host,
     install them in the container, and copy critical directories to emulate the environment
-    without relying on specialized container images like 'prestashop/prestashop'.
-    
-    This is a best-effort approach and may need customization for your environment.
+    without relying on specialized container images. Noninteractive & TZ=America/Denver to avoid prompts.
     """
     check_all_dependencies()
     os_name, version = detect_os()
@@ -1024,8 +1037,6 @@ def advanced_os_containerize_service():
     os.makedirs(build_context)
 
     # 1) Attempt to detect installed packages (best-effort).
-    #    For demonstration, we check for common LAMP packages.
-    #    Extend or customize as needed.
     packages_to_install = []
     sysname = platform.system().lower()
 
@@ -1036,7 +1047,8 @@ def advanced_os_containerize_service():
             common_rpm_packages = ["httpd", "php", "php-mysql", "mariadb-server"]
             for pkg in common_rpm_packages:
                 try:
-                    ret = subprocess.call(["rpm", "-q", pkg], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    ret = subprocess.call(["rpm", "-q", pkg],
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     if ret == 0:
                         packages_to_install.append(pkg)
                 except:
@@ -1046,7 +1058,8 @@ def advanced_os_containerize_service():
             common_deb_packages = ["apache2", "php", "php-mysql", "mariadb-server"]
             for pkg in common_deb_packages:
                 try:
-                    ret = subprocess.call(["dpkg", "-l", pkg], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    ret = subprocess.call(["dpkg", "-l", pkg],
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     if ret == 0:
                         packages_to_install.append(pkg)
                 except:
@@ -1073,21 +1086,35 @@ def advanced_os_containerize_service():
 
     # 3) Generate Dockerfile
     dockerfile_path = os.path.join(build_context, "Dockerfile")
+
+    # We'll set environment variables to force noninteractive mode & default to America/Denver
+    # Then do best-effort install of detected packages.
     install_cmd = ""
     if packages_to_install:
-        # We do a best-effort approach for the base image
-        # If it looks like CentOS or Fedora, use yum/dnf
-        # If Debian/Ubuntu, use apt-get
-        # Otherwise, just skip
-        if "centos" in base_image or "fedora" in base_image:
-            install_cmd = f"RUN yum install -y {' '.join(packages_to_install)} && yum clean all\n"
-        elif "debian" in base_image or "ubuntu" in base_image:
-            install_cmd = f"RUN apt-get update && apt-get install -y {' '.join(packages_to_install)} && apt-get clean\n"
+        if any(x in base_image for x in ["centos", "fedora"]):
+            pkgs_str = " ".join(packages_to_install)
+            install_cmd = (
+                "RUN yum -y install " + pkgs_str + " && yum clean all"
+            )
+        elif any(x in base_image for x in ["ubuntu", "debian"]):
+            pkgs_str = " ".join(packages_to_install)
+            install_cmd = (
+                "RUN apt-get update && "
+                "DEBIAN_FRONTEND=noninteractive "
+                "TZ=America/Denver "
+                f"apt-get install -y {pkgs_str} && "
+                "apt-get clean"
+            )
+        else:
+            install_cmd = "# (No recognized distro for auto-install)"
 
     dockerfile_content = f"""FROM {base_image}
 
-# Install packages detected on the host (best effort)
-{install_cmd.strip()}
+# Avoid interactive tzdata config
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=America/Denver
+
+{install_cmd}
 
 # Copy service configuration and data
 COPY var_www/ /var/www/
@@ -1117,7 +1144,6 @@ CMD ["httpd", "-D", "FOREGROUND"]
     if run_container:
         container_name = input("Enter a name for the container (default 'advanced_service_container'): ").strip() or "advanced_service_container"
         cmd = ["docker", "run", "-d", "--name", container_name]
-        # Enforce read-only + non-root if chosen
         cmd = maybe_apply_read_only_and_nonroot(cmd)
         cmd.append(image_name)
         try:
@@ -1168,7 +1194,7 @@ def interactive_menu():
 
 def main():
     parser = argparse.ArgumentParser(
-        description="CCDC OS-to-Container & Integrity Tool with step-by-step options, read-only+non-root fixes, and advanced OS-based containerization."
+        description="CCDC OS-to-Container & Integrity Tool with step-by-step options, Docker Compose auto-install, and forced noninteractive mode (TZ=America/Denver)."
     )
     parser.add_argument("--menu", action="store_true", help="Launch interactive menu")
     args = parser.parse_args()
