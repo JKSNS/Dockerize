@@ -590,8 +590,10 @@ def deploy_web_stack():
 
 def deploy_modsecurity_waf(network_name, backend_container):
     """
-    Deploy a ModSecurity-enabled reverse proxy container on the specified network,
-    linking it to the given backend container (which is not published externally).
+    Deploy a ModSecurity-enabled reverse proxy container that:
+      - Publishes port 80 publicly for normal site traffic
+      - Publishes port 8080 bound to localhost for an 'admin panel'
+      - Proxies to the backend_container:80 internally
     """
     waf_image = "owasp/modsecurity-crs:nginx"
     pull_docker_image(waf_image)
@@ -600,19 +602,18 @@ def deploy_modsecurity_waf(network_name, backend_container):
     default_waf_name = "modsec2-nginx"
     waf_container = prompt_for_container_name(default_waf_name)
     
-    # We won't prompt for read-only by default, since the WAF may need to write logs.
+    # We'll default read-only to off, so logs can be written
     waf_read_only = input("Should the WAF container run in read-only mode? (y/n) [n]: ").strip().lower() == "y"
     
-    # Let user choose which port the WAF is published on the host
-    # If you want all traffic on host port 80, set default to 80:
-    host_waf_port = input("Enter host port for the WAF (default '80'): ").strip() or "80"
-    
     tz = os.environ.get("TZ", "UTC")
+    
+    # The environment variables for the WAF container
+    #  - 'PORT=80' means the container's main Nginx listens on port 80 internally
+    #  - We assume a custom Nginx config that also listens on port 8080 for an admin interface
     waf_env = [
-        "PORT=8080",  # Inside container
+        "PORT=80",                             # Main site inside container
         "PROXY=1",
-        # Instead of host.docker.internal, use the container name + port
-        f"BACKEND=http://{backend_container}:80",
+        f"BACKEND=http://{backend_container}:80",  # Points to the web container
         "MODSEC_RULE_ENGINE=on",
         "BLOCKING_PARANOIA=4",
         f"TZ={tz}",
@@ -621,19 +622,21 @@ def deploy_modsecurity_waf(network_name, backend_container):
         "MODSEC_RESP_BODY_MIMETYPE=text/plain text/html text/xml application/json",
         "COMBINED_FILE_SIZES=65535"
     ]
+    
     print(f"[INFO] Launching ModSecurity proxy container '{waf_container}' from image '{waf_image}'...")
     
+    # We publish two ports:
+    #  1) 80:80 -> The public-facing site
+    #  2) 127.0.0.1:8080:8080 -> Admin panel, bound only to localhost
     cmd = [
         "docker", "run", "-d",
         "--network", network_name,
         "--name", waf_container,
-        # Publish WAF container's port 8080 to host port (e.g. 80)
-        "-p", f"{host_waf_port}:8080"
+        "-p", "80:80",                       # Public site on host port 80
+        "-p", "127.0.0.1:8080:8080"          # Admin panel accessible only from localhost
     ]
     
-    # (Optional) If you truly want the WAF to connect to the host, you'd add --add-host here,
-    # but in this scenario, we want it to connect to the container by name, so no need.
-    
+    # Add environment variables
     for env_var in waf_env:
         cmd.extend(["-e", env_var])
     
@@ -646,6 +649,7 @@ def deploy_modsecurity_waf(network_name, backend_container):
         subprocess.check_call(cmd)
     except subprocess.CalledProcessError as e:
         print(f"[ERROR] Could not launch ModSecurity proxy container '{waf_container}': {e}")
+
 
 
 # -------------------------------------------------
