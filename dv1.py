@@ -1,14 +1,6 @@
 #!/usr/bin/env python3
 """
 ccdc_integrity_tool.py
-
-This tool now supports encapsulating an existing Linux service (with its configuration and data)
-into a Docker container. It copies key directories (e.g., /var/www, /var/lib/mysql, /etc/httpd)
-into a build context, creates a Dockerfile to rebuild the environment, and builds (and optionally runs)
-a container with the encapsulated service.
-
-It also contains functions for auto-installing Docker, integrity checking, and deploying multi-container
-web stacks.
 """
 
 import sys
@@ -366,6 +358,28 @@ def continuous_integrity_check(container_name, snapshot_tar, check_interval=30):
     except KeyboardInterrupt:
         print("\n[INFO] Continuous integrity check interrupted by user.")
 
+def minimal_integrity_check(container_name, check_interval=30):
+    """
+    A simplified integrity check that only compares hashes but does not restore.
+    """
+    print(f"[INFO] Starting minimal integrity check on '{container_name}' (no restore) every {check_interval} seconds.")
+    baseline_hash = compute_container_hash(container_name)
+    if not baseline_hash:
+        print("[ERROR] Failed to obtain baseline hash. Exiting integrity check.")
+        return
+    try:
+        while True:
+            time.sleep(check_interval)
+            current_hash = compute_container_hash(container_name)
+            if current_hash != baseline_hash:
+                print(f"[WARN] Integrity violation detected in container '{container_name}'!")
+                print("[INFO] No restoration configured. Please investigate manually.")
+                baseline_hash = current_hash
+            else:
+                print(f"[INFO] Container '{container_name}' is unchanged.")
+    except KeyboardInterrupt:
+        print("\n[INFO] Minimal integrity check interrupted by user.")
+
 # -------------------------------------------------
 # 4A. Container Name Handling
 # -------------------------------------------------
@@ -388,7 +402,6 @@ def prompt_for_container_name(default_name):
     """
     while True:
         name = input(f"Enter container name (default '{default_name}'): ").strip() or default_name
-        
         if not container_exists(name):
             return name  # Name is available
         else:
@@ -398,7 +411,6 @@ def prompt_for_container_name(default_name):
                            "  [C] Choose another name\n"
                            "  [X] Exit\n"
                            "Enter your choice (R/C/X): ").strip().lower()
-            
             if choice == "r":
                 try:
                     subprocess.check_call(["docker", "rm", "-f", name])
@@ -413,22 +425,150 @@ def prompt_for_container_name(default_name):
                 sys.exit(1)
 
 # -------------------------------------------------
-# 5. Deploy Web Stack (DB + Web + Optional WAF)
+# 5. Setup Docker DB, Web, WAF
 # -------------------------------------------------
 
-def deploy_web_stack():
+def setup_docker_db():
+    """
+    Set up a Dockerized database (e.g., MariaDB).
+    """
+    check_all_dependencies()
+    print("=== Database Container Setup ===")
+    default_db_name = "web_db"
+    db_container = prompt_for_container_name(default_db_name)
+    
+    volume_opts_db = []
+    print("[NOTE] A database container typically needs write access.")
+    print("Mount /var/lib/mysql or other directories if you want to store data on the host.")
+    while True:
+        dir_input = input("Directories to mount into the DB container (blank to finish): ").strip()
+        if not dir_input:
+            break
+        volume_opts_db.extend(["-v", f"{dir_input}:{dir_input}"])
+    
+    db_read_only = input("Should the DB container run in read-only mode? (y/n) [n]: ").strip().lower() == "y"
+    
+    pull_docker_image("mariadb:latest")
+    
+    db_password = input("Enter MariaDB root password (default 'root'): ").strip() or "root"
+    db_name = input("Enter a DB name to create (default 'mydb'): ").strip() or "mydb"
+    
+    cmd = [
+        "docker", "run", "-d",
+        "--name", db_container
+    ]
+    # We'll put it on a user-specified network or default to 'bridge'
+    network_name = input("Enter a Docker network name to attach (default 'bridge'): ").strip() or "bridge"
+    if network_name != "bridge":
+        try:
+            subprocess.check_call(["docker", "network", "inspect", network_name],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            print(f"[INFO] Using existing network '{network_name}'.")
+        except subprocess.CalledProcessError:
+            print(f"[INFO] Creating Docker network '{network_name}'.")
+            subprocess.check_call(["docker", "network", "create", network_name])
+        cmd.extend(["--network", network_name])
+    
+    cmd.extend(volume_opts_db)
+    cmd.extend([
+        "-e", f"MYSQL_ROOT_PASSWORD={db_password}",
+        "-e", f"MYSQL_DATABASE={db_name}"
+    ])
+    if db_read_only:
+        cmd.append("--read-only")
+    
+    cmd.append("mariadb:latest")
+    
+    print(f"[INFO] Launching MariaDB container '{db_container}'.")
+    try:
+        subprocess.check_call(cmd)
+        print(f"[INFO] Database container '{db_container}' launched successfully.")
+    except subprocess.CalledProcessError as e:
+        print(f"[ERROR] Could not launch MariaDB container '{db_container}': {e}")
+        sys.exit(1)
+
+def setup_docker_waf():
+    """
+    Set up a Dockerized WAF (e.g., ModSecurity).
+    """
+    check_all_dependencies()
+    waf_image = "owasp/modsecurity-crs:nginx"
+    pull_docker_image(waf_image)
+    
+    print("=== ModSecurity WAF Container Setup ===")
+    default_waf_name = "modsec2-nginx"
+    waf_container = prompt_for_container_name(default_waf_name)
+    
+    waf_read_only = input("Should the WAF container run in read-only mode? (y/n) [n]: ").strip().lower() == "y"
+    host_waf_port = input("Enter host port for the WAF (default '8080'): ").strip() or "8080"
+    
+    # Connect to an existing Docker network:
+    network_name = input("Enter the Docker network to attach (default 'bridge'): ").strip() or "bridge"
+    if network_name != "bridge":
+        try:
+            subprocess.check_call(["docker", "network", "inspect", network_name],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            print(f"[INFO] Using existing network '{network_name}'.")
+        except subprocess.CalledProcessError:
+            print(f"[INFO] Creating Docker network '{network_name}'.")
+            subprocess.check_call(["docker", "network", "create", network_name])
+    
+    # The user must provide the backend container name or IP
+    backend_container = input("Enter the backend container name or IP (default 'web_container'): ").strip() or "web_container"
+    
+    tz = os.environ.get("TZ", "UTC")
+    waf_env = [
+        "PORT=8080",
+        "PROXY=1",
+        f"BACKEND=http://{backend_container}:80",
+        "MODSEC_RULE_ENGINE=on",
+        "BLOCKING_PARANOIA=4",
+        f"TZ={tz}",
+        "MODSEC_TMP_DIR=/tmp",
+        "MODSEC_RESP_BODY_ACCESS=On",
+        "MODSEC_RESP_BODY_MIMETYPE=text/plain text/html text/xml application/json",
+        "COMBINED_FILE_SIZES=65535"
+    ]
+    
+    print(f"[INFO] Launching ModSecurity proxy container '{waf_container}' from image '{waf_image}'...")
+    cmd = [
+        "docker", "run", "-d",
+        "--network", network_name,
+        "--name", waf_container,
+        "-p", f"{host_waf_port}:8080"
+    ]
+    for env_var in waf_env:
+        cmd.extend(["-e", env_var])
+    
+    if waf_read_only:
+        cmd.append("--read-only")
+    
+    cmd.append(waf_image)
+    
+    try:
+        subprocess.check_call(cmd)
+        print(f"[INFO] WAF container '{waf_container}' launched successfully.")
+    except subprocess.CalledProcessError as e:
+        print(f"[ERROR] Could not launch ModSecurity proxy container '{waf_container}': {e}")
+        sys.exit(1)
+
+# -------------------------------------------------
+# 6. Web Stack Deployment (DB + Web + WAF)
+# -------------------------------------------------
+
+def deploy_entire_web_stack():
     """
     Deploy a DB container (optional) + a web app container (e.g., PrestaShop) + optional ModSecurity WAF.
-    Defaults to not using read-only for PrestaShop/WAF to keep them running.
+    This is the "all-in-one" approach.
     """
-    print("==== Deploy Web Stack ====")
     check_all_dependencies()
     
     # Step 1: DB choice
-    db_choice = input("Use dockerized database (D) or native OS database (N)? (D/N): ").strip().lower()
+    db_choice = input("Use dockerized database (D) or skip DB setup (S)? (D/S): ").strip().lower()
     dockerized_db = (db_choice == "d")
     
     network_name = "ccdc-service-net"
+    # Create network if not exists
     try:
         subprocess.check_call(["docker", "network", "inspect", network_name],
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -484,7 +624,7 @@ def deploy_web_stack():
         print(f"[INFO] Launching MariaDB container '{db_container}'.")
         try:
             subprocess.check_call(cmd)
-            db_host = db_container
+            db_host = db_container  # We'll use the container name as the DB host inside Docker network
         except subprocess.CalledProcessError as e:
             print(f"[ERROR] Could not launch MariaDB container '{db_container}': {e}")
             sys.exit(1)
@@ -516,7 +656,7 @@ def deploy_web_stack():
     service_container = prompt_for_container_name(default_web_name)
     
     volume_opts_web = []
-    print("Mounting /var/www/html by default for PrestaShop or WordPress to store data.")
+    print("Mounting /var/www/html by default for PrestaShop/WordPress to store data.")
     volume_opts_web.extend(["-v", f"/var/www/html:/var/www/html"])
     
     while True:
@@ -529,6 +669,7 @@ def deploy_web_stack():
     
     env_vars = []
     if ecomm_choice == "1":
+        # PrestaShop: force auto-install so it doesn't exit
         env_vars.extend(["-e", "PS_INSTALL_AUTO=1"])
     
     if dockerized_db:
@@ -570,10 +711,14 @@ def deploy_web_stack():
         print(f"[ERROR] Could not launch service container '{service_container}': {e}")
         sys.exit(1)
     
+    # Step 4: Optionally deploy a ModSecurity WAF
     add_waf = input("Would you like to add a ModSecurity WAF? (y/n): ").strip().lower()
     if add_waf == "y":
+        # Re-use the function that sets up WAF, but force it to use the same network and backend
+        # Or just call 'setup_docker_waf()' and let the user specify again
         deploy_modsecurity_waf(network_name, service_container)
     
+    # Step 5: Offer integrity checking
     run_integrity = input("Would you like to run continuous integrity checking on the web container? (y/n): ").strip().lower()
     if run_integrity == "y":
         snapshot_tar = input("Enter the path to the snapshot .tar file for restoration: ").strip()
@@ -634,107 +779,6 @@ def deploy_modsecurity_waf(network_name, backend_container):
         print(f"[ERROR] Could not launch ModSecurity proxy container '{waf_container}': {e}")
 
 # -------------------------------------------------
-# 6. Additional Commands or Integrity Menus
-# -------------------------------------------------
-
-def run_integrity_check_for_all():
-    """
-    Apply continuous integrity check to all running containers (or let user pick).
-    Each container needs its own snapshot .tar if you want to restore from changes.
-    """
-    check_all_dependencies()
-    try:
-        output = subprocess.check_output(["docker", "ps", "--format", "{{.Names}}"], text=True)
-        running_containers = output.split()
-        if not running_containers:
-            print("[INFO] No running containers found.")
-            return
-        print("[INFO] The following containers are running:")
-        for idx, c in enumerate(running_containers, 1):
-            print(f"  {idx}. {c}")
-        
-        choice = input("Enter 'all' to run integrity checks on all, or comma-separated indexes: ").strip().lower()
-        if choice == "all":
-            selected = running_containers
-        else:
-            indexes = [x.strip() for x in choice.split(",") if x.strip()]
-            selected = []
-            for i in indexes:
-                try:
-                    idx = int(i)
-                    if 1 <= idx <= len(running_containers):
-                        selected.append(running_containers[idx - 1])
-                except ValueError:
-                    pass
-        if not selected:
-            print("[ERROR] No valid containers selected. Exiting.")
-            return
-        
-        check_interval_str = input("Enter integrity check interval in seconds (default 30): ").strip()
-        try:
-            check_interval = int(check_interval_str) if check_interval_str else 30
-        except ValueError:
-            check_interval = 30
-        
-        for container_name in selected:
-            print(f"\n==== Setting up integrity check for container '{container_name}' ====")
-            snapshot_tar = input("Enter the path to the snapshot .tar file for restoration (blank to skip): ").strip()
-            if not snapshot_tar:
-                print(f"[INFO] Skipping snapshot-based restoration for '{container_name}'. (Will just hash-check without restore.)")
-                minimal_integrity_check(container_name, check_interval)
-            else:
-                continuous_integrity_check(container_name, snapshot_tar, check_interval)
-    except subprocess.CalledProcessError as e:
-        print(f"[ERROR] Could not list running containers: {e}")
-
-def minimal_integrity_check(container_name, check_interval=30):
-    """
-    A simplified integrity check that only compares hashes but does not restore.
-    """
-    print(f"[INFO] Starting minimal integrity check on '{container_name}' (no restore) every {check_interval} seconds.")
-    baseline_hash = compute_container_hash(container_name)
-    if not baseline_hash:
-        print("[ERROR] Failed to obtain baseline hash. Exiting integrity check.")
-        return
-    try:
-        while True:
-            time.sleep(check_interval)
-            current_hash = compute_container_hash(container_name)
-            if current_hash != baseline_hash:
-                print(f"[WARN] Integrity violation detected in container '{container_name}'!")
-                print("[INFO] No restoration configured. Please investigate manually.")
-                baseline_hash = current_hash
-            else:
-                print(f"[INFO] Container '{container_name}' is unchanged.")
-    except KeyboardInterrupt:
-        print("\n[INFO] Minimal integrity check interrupted by user.")
-
-def run_integrity_check_menu():
-    """Interactive prompt to run continuous integrity check."""
-    print("==== Continuous Integrity Check ====")
-    print("1. Integrity check for a single container")
-    print("2. Integrity check for multiple/all containers")
-    choice = input("Choose an option (1/2): ").strip()
-    
-    if choice == "1":
-        container_name = input("Enter the container name to monitor: ").strip()
-        snapshot_tar = input("Enter the path to the snapshot .tar file for restoration (or blank to skip): ").strip()
-        check_interval_str = input("Enter integrity check interval in seconds (default 30): ").strip()
-        try:
-            check_interval = int(check_interval_str) if check_interval_str else 30
-        except ValueError:
-            check_interval = 30
-        check_all_dependencies()
-        if snapshot_tar:
-            continuous_integrity_check(container_name, snapshot_tar, check_interval)
-        else:
-            minimal_integrity_check(container_name, check_interval)
-    elif choice == "2":
-        run_integrity_check_for_all()
-    else:
-        print("[ERROR] Invalid choice. Exiting.")
-
-# -------------------------------------------------
 # 7. Containerize Current Service Environment
 # -------------------------------------------------
 
@@ -744,7 +788,6 @@ def containerize_service():
     into a Docker container by copying key directories (/var/www, /var/lib/mysql, /etc/httpd)
     into a build context, generating a Dockerfile, building the image, and optionally running a container.
     """
-    print("==== Containerize Current Service Environment ====")
     check_all_dependencies()
     
     # Determine base image using host OS info
@@ -816,35 +859,126 @@ CMD ["/usr/sbin/httpd", "-D", "FOREGROUND"]
         print("[INFO] Container build process completed. You can run the image later using 'docker run'.")
 
 # -------------------------------------------------
-# 8. Interactive Main Menu
+# 8. Integrity Check Menu
+# -------------------------------------------------
+
+def run_integrity_check_menu():
+    """Interactive prompt to run continuous integrity checks."""
+    print("==== Continuous Integrity Check ====")
+    print("1. Integrity check for a single container")
+    print("2. Integrity check for multiple/all containers")
+    choice = input("Choose an option (1/2): ").strip()
+    
+    if choice == "1":
+        container_name = input("Enter the container name to monitor: ").strip()
+        snapshot_tar = input("Enter the path to the snapshot .tar file for restoration (or blank to skip): ").strip()
+        check_interval_str = input("Enter integrity check interval in seconds (default 30): ").strip()
+        try:
+            check_interval = int(check_interval_str) if check_interval_str else 30
+        except ValueError:
+            check_interval = 30
+        check_all_dependencies()
+        if snapshot_tar:
+            continuous_integrity_check(container_name, snapshot_tar, check_interval)
+        else:
+            minimal_integrity_check(container_name, check_interval)
+    elif choice == "2":
+        run_integrity_check_for_all()
+    else:
+        print("[ERROR] Invalid choice. Exiting.")
+
+def run_integrity_check_for_all():
+    """
+    Apply continuous integrity check to all running containers (or let user pick).
+    Each container needs its own snapshot .tar if you want to restore from changes.
+    """
+    check_all_dependencies()
+    try:
+        output = subprocess.check_output(["docker", "ps", "--format", "{{.Names}}"], text=True)
+        running_containers = output.split()
+        if not running_containers:
+            print("[INFO] No running containers found.")
+            return
+        print("[INFO] The following containers are running:")
+        for idx, c in enumerate(running_containers, 1):
+            print(f"  {idx}. {c}")
+        
+        choice = input("Enter 'all' to run integrity checks on all, or comma-separated indexes: ").strip().lower()
+        if choice == "all":
+            selected = running_containers
+        else:
+            indexes = [x.strip() for x in choice.split(",") if x.strip()]
+            selected = []
+            for i in indexes:
+                try:
+                    idx = int(i)
+                    if 1 <= idx <= len(running_containers):
+                        selected.append(running_containers[idx - 1])
+                except ValueError:
+                    pass
+        if not selected:
+            print("[ERROR] No valid containers selected. Exiting.")
+            return
+        
+        check_interval_str = input("Enter integrity check interval in seconds (default 30): ").strip()
+        try:
+            check_interval = int(check_interval_str) if check_interval_str else 30
+        except ValueError:
+            check_interval = 30
+        
+        for container_name in selected:
+            print(f"\n==== Setting up integrity check for container '{container_name}' ====")
+            snapshot_tar = input("Enter the path to the snapshot .tar file for restoration (blank to skip): ").strip()
+            if not snapshot_tar:
+                print(f"[INFO] Skipping snapshot-based restoration for '{container_name}'. (Will just hash-check without restore.)")
+                minimal_integrity_check(container_name, check_interval)
+            else:
+                continuous_integrity_check(container_name, snapshot_tar, check_interval)
+    except subprocess.CalledProcessError as e:
+        print(f"[ERROR] Could not list running containers: {e}")
+
+# -------------------------------------------------
+# 9. Main Interactive Menu
 # -------------------------------------------------
 
 def interactive_menu():
-    """Display the interactive menu for container deployment, integrity checking, and containerizing the current service."""
-    print("==== CCDC Container Deployment Tool ====")
-    print("Select an option:")
-    print("1. Deploy Web Stack (DB + Web App + Optional WAF)")
-    print("2. Run Continuous Integrity Check")
-    print("3. Containerize Current Service Environment")
-    choice = input("Enter your choice (1/2/3): ").strip()
-    
-    if choice == "1":
-        deploy_web_stack()
-    elif choice == "2":
-        run_integrity_check_menu()
-    elif choice == "3":
-        containerize_service()
-    else:
-        print("[ERROR] Invalid option. Exiting.")
-        sys.exit(1)
+    """
+    Display the interactive menu for each major step.
+    You can choose to run only the parts you want, one at a time.
+    """
+    while True:
+        print("\n==== CCDC Container Deployment Tool ====")
+        print("1. Containerize Current Service Environment (copy /var/www, /var/lib/mysql, /etc/httpd)")
+        print("2. Setup Docker Database (e.g., MariaDB)")
+        print("3. Setup Docker WAF (e.g., ModSecurity)")
+        print("4. Run Continuous Integrity Check (single or multiple containers)")
+        print("5. Deploy Entire Web Stack (DB + Web App + Optional WAF) [All-in-one]")
+        print("6. Exit")
+        choice = input("Enter your choice (1-6): ").strip()
+        
+        if choice == "1":
+            containerize_service()
+        elif choice == "2":
+            setup_docker_db()
+        elif choice == "3":
+            setup_docker_waf()
+        elif choice == "4":
+            run_integrity_check_menu()
+        elif choice == "5":
+            deploy_entire_web_stack()
+        elif choice == "6":
+            print("[INFO] Exiting. Goodbye!")
+            sys.exit(0)
+        else:
+            print("[ERROR] Invalid option. Please try again.")
 
 # -------------------------------------------------
-# 9. Main Entry Point
+# 10. Main Entry Point
 # -------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(
-        description="CCDC OS-to-Container & Integrity Tool with multi-container checks, improved PrestaShop/WAF deployment, and a new option to encapsulate the current service into a Docker container."
+        description="CCDC OS-to-Container & Integrity Tool with step-by-step options."
     )
     parser.add_argument("--menu", action="store_true", help="Launch interactive menu")
     args = parser.parse_args()
