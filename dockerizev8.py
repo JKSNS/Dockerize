@@ -1,13 +1,6 @@
 #!/usr/bin/env python3
 """
 ccdc_integrity_tool.py
-
-Updated script with:
-- Re-ordered container deployment (DB, then Web, then optional WAF).
-- Defaulting PrestaShop & WAF to NOT read-only, since they typically need to write to disk.
-- Adds PS_INSTALL_AUTO=1 for PrestaShop to avoid exiting.
-- Default volume mount for /var/www/html in PrestaShop container.
-- New menu option to apply continuous integrity checks to multiple/all running containers.
 """
 
 import sys
