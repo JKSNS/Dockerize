@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 """
 ccdc_integrity_tool.py
+
+Major changes:
+1) Option 5 is now labeled "[LEGACY]".
+2) 'Read-only' option truly enforces read-only mode AND runs the container as non-root (on Linux).
+3) A new Option 6 attempts to detect the host OS, pull a matching base image,
+   detect installed packages (Apache, PHP, etc.), install them, and copy relevant directories
+   so that a custom web app can be containerized without using a specialized container image (like PrestaShop).
+
+Adjust as necessary for your environment.
 """
 
 import sys
@@ -246,13 +255,47 @@ def detect_os():
 def map_os_to_docker_image(os_name, version):
     """Map the detected OS to a recommended Docker base image (best-effort)."""
     linux_map = {
-        "centos": {"6": "centos:6", "7": "centos:7", "8": "centos:8", "9": "centos:stream9", "": "ubuntu:latest"},
-        "ubuntu": {"14": "ubuntu:14.04", "16": "ubuntu:16.04", "18": "ubuntu:18.04", "20": "ubuntu:20.04", "22": "ubuntu:22.04"},
-        "debian": {"7": "debian:7", "8": "debian:8", "9": "debian:9", "10": "debian:10", "11": "debian:11", "12": "debian:12"},
-        "fedora": {"25": "fedora:25", "26": "fedora:26", "27": "fedora:27", "28": "fedora:28", "29": "fedora:29", "30": "fedora:30", "31": "fedora:31", "35": "fedora:35"},
-        "opensuse leap": {"15": "opensuse/leap:15"},
-        "opensuse tumbleweed": {"": "opensuse/tumbleweed"},
-        "linux": {"": "ubuntu:latest"}
+        "centos": {
+            "6": "centos:6",
+            "7": "centos:7",
+            "8": "centos:8",
+            "9": "centos:stream9",
+            "": "ubuntu:latest"
+        },
+        "ubuntu": {
+            "14": "ubuntu:14.04",
+            "16": "ubuntu:16.04",
+            "18": "ubuntu:18.04",
+            "20": "ubuntu:20.04",
+            "22": "ubuntu:22.04"
+        },
+        "debian": {
+            "7": "debian:7",
+            "8": "debian:8",
+            "9": "debian:9",
+            "10": "debian:10",
+            "11": "debian:11",
+            "12": "debian:12"
+        },
+        "fedora": {
+            "25": "fedora:25",
+            "26": "fedora:26",
+            "27": "fedora:27",
+            "28": "fedora:28",
+            "29": "fedora:29",
+            "30": "fedora:30",
+            "31": "fedora:31",
+            "35": "fedora:35"
+        },
+        "opensuse leap": {
+            "15": "opensuse/leap:15"
+        },
+        "opensuse tumbleweed": {
+            "": "opensuse/tumbleweed"
+        },
+        "linux": {
+            "": "ubuntu:latest"
+        }
     }
     windows_map = {
         "xp":      "legacy-windows/xp:latest",
@@ -425,12 +468,31 @@ def prompt_for_container_name(default_name):
                 sys.exit(1)
 
 # -------------------------------------------------
+# Helper: Apply Read-Only + Non-Root
+# -------------------------------------------------
+
+def maybe_apply_read_only_and_nonroot(cmd_list):
+    """
+    If the user chooses read-only, enforce --read-only and --user nobody (on Linux-like).
+    If on Windows, just do --read-only.
+    """
+    read_only = input("Should this container run in read-only mode? (y/n) [n]: ").strip().lower() == "y"
+    if read_only:
+        sysname = platform.system().lower()
+        # Always do --read-only
+        cmd_list.append("--read-only")
+        # If not Windows, also drop root privileges
+        if not sysname.startswith("windows"):
+            cmd_list.extend(["--user", "nobody"])
+    return cmd_list
+
+# -------------------------------------------------
 # 5. Setup Docker DB, Web, WAF
 # -------------------------------------------------
 
 def setup_docker_db():
     """
-    Set up a Dockerized database (e.g., MariaDB).
+    Set up a Dockerized database (e.g., MariaDB) with optional read-only + non-root.
     """
     check_all_dependencies()
     print("=== Database Container Setup ===")
@@ -446,8 +508,6 @@ def setup_docker_db():
             break
         volume_opts_db.extend(["-v", f"{dir_input}:{dir_input}"])
     
-    db_read_only = input("Should the DB container run in read-only mode? (y/n) [n]: ").strip().lower() == "y"
-    
     pull_docker_image("mariadb:latest")
     
     db_password = input("Enter MariaDB root password (default 'root'): ").strip() or "root"
@@ -457,7 +517,7 @@ def setup_docker_db():
         "docker", "run", "-d",
         "--name", db_container
     ]
-    # We'll put it on a user-specified network or default to 'bridge'
+    # Choose network or default to 'bridge'
     network_name = input("Enter a Docker network name to attach (default 'bridge'): ").strip() or "bridge"
     if network_name != "bridge":
         try:
@@ -469,13 +529,14 @@ def setup_docker_db():
             subprocess.check_call(["docker", "network", "create", network_name])
         cmd.extend(["--network", network_name])
     
+    # Enforce read-only + non-root if chosen
+    cmd = maybe_apply_read_only_and_nonroot(cmd)
+    
     cmd.extend(volume_opts_db)
     cmd.extend([
         "-e", f"MYSQL_ROOT_PASSWORD={db_password}",
         "-e", f"MYSQL_DATABASE={db_name}"
     ])
-    if db_read_only:
-        cmd.append("--read-only")
     
     cmd.append("mariadb:latest")
     
@@ -489,7 +550,7 @@ def setup_docker_db():
 
 def setup_docker_waf():
     """
-    Set up a Dockerized WAF (e.g., ModSecurity).
+    Set up a Dockerized WAF (e.g., ModSecurity) with optional read-only + non-root.
     """
     check_all_dependencies()
     waf_image = "owasp/modsecurity-crs:nginx"
@@ -499,7 +560,6 @@ def setup_docker_waf():
     default_waf_name = "modsec2-nginx"
     waf_container = prompt_for_container_name(default_waf_name)
     
-    waf_read_only = input("Should the WAF container run in read-only mode? (y/n) [n]: ").strip().lower() == "y"
     host_waf_port = input("Enter host port for the WAF (default '8080'): ").strip() or "8080"
     
     # Connect to an existing Docker network:
@@ -537,11 +597,12 @@ def setup_docker_waf():
         "--name", waf_container,
         "-p", f"{host_waf_port}:8080"
     ]
+    
+    # Enforce read-only + non-root if chosen
+    cmd = maybe_apply_read_only_and_nonroot(cmd)
+    
     for env_var in waf_env:
         cmd.extend(["-e", env_var])
-    
-    if waf_read_only:
-        cmd.append("--read-only")
     
     cmd.append(waf_image)
     
@@ -553,13 +614,13 @@ def setup_docker_waf():
         sys.exit(1)
 
 # -------------------------------------------------
-# 6. Web Stack Deployment (DB + Web + WAF)
+# 6. Web Stack Deployment (LEGACY)
 # -------------------------------------------------
 
-def deploy_entire_web_stack():
+def deploy_entire_web_stack_legacy():
     """
-    Deploy a DB container (optional) + a web app container (e.g., PrestaShop) + optional ModSecurity WAF.
-    This is the "all-in-one" approach.
+    [LEGACY] Deploy a DB container (optional) + a web app container (e.g., PrestaShop) + optional ModSecurity WAF.
+    This is the old all-in-one approach.
     """
     check_all_dependencies()
     
@@ -598,8 +659,6 @@ def deploy_entire_web_stack():
                 break
             volume_opts_db.extend(["-v", f"{dir_input}:{dir_input}"])
         
-        db_read_only = input("Should the DB container run in read-only mode? (y/n) [n]: ").strip().lower() == "y"
-        
         pull_docker_image("mariadb:latest")
         
         db_password = input("Enter MariaDB root password (default 'root'): ").strip() or "root"
@@ -611,13 +670,15 @@ def deploy_entire_web_stack():
             "--name", db_container,
             "--network", network_name
         ]
+        
+        # Enforce read-only + non-root if chosen
+        cmd = maybe_apply_read_only_and_nonroot(cmd)
+        
         cmd.extend(volume_opts_db)
         cmd.extend([
             "-e", f"MYSQL_ROOT_PASSWORD={db_password}",
             "-e", f"MYSQL_DATABASE={db_name}"
         ])
-        if db_read_only:
-            cmd.append("--read-only")
         
         cmd.append("mariadb:latest")
         
@@ -665,8 +726,16 @@ def deploy_entire_web_stack():
             break
         volume_opts_web.extend(["-v", f"{dir_input}:{dir_input}"])
     
-    web_read_only = input("Should the web container run in read-only mode? (y/n) [n]: ").strip().lower() == "y"
+    cmd = [
+        "docker", "run", "-d",
+        "--name", service_container,
+        "--network", network_name
+    ]
     
+    # Enforce read-only + non-root if chosen
+    cmd = maybe_apply_read_only_and_nonroot(cmd)
+    
+    # Additional environment variables for DB
     env_vars = []
     if ecomm_choice == "1":
         # PrestaShop: force auto-install so it doesn't exit
@@ -691,17 +760,8 @@ def deploy_entire_web_stack():
             "-e", f"DB_NAME={db_name}"
         ])
     
-    cmd = [
-        "docker", "run", "-d",
-        "--name", service_container,
-        "--network", network_name
-    ]
     cmd.extend(volume_opts_web)
     cmd.extend(env_vars)
-    
-    if web_read_only:
-        cmd.append("--read-only")
-    
     cmd.append(service_image)
     
     print(f"[INFO] Launching service container '{service_container}' with image '{service_image}'.")
@@ -714,8 +774,6 @@ def deploy_entire_web_stack():
     # Step 4: Optionally deploy a ModSecurity WAF
     add_waf = input("Would you like to add a ModSecurity WAF? (y/n): ").strip().lower()
     if add_waf == "y":
-        # Re-use the function that sets up WAF, but force it to use the same network and backend
-        # Or just call 'setup_docker_waf()' and let the user specify again
         deploy_modsecurity_waf(network_name, service_container)
     
     # Step 5: Offer integrity checking
@@ -732,7 +790,7 @@ def deploy_entire_web_stack():
 def deploy_modsecurity_waf(network_name, backend_container):
     """
     Deploy a ModSecurity-enabled reverse proxy container on the specified network,
-    linking it to the given backend container. Defaults to not read-only.
+    linking it to the given backend container. Enforces read-only + non-root if chosen.
     """
     waf_image = "owasp/modsecurity-crs:nginx"
     pull_docker_image(waf_image)
@@ -741,8 +799,17 @@ def deploy_modsecurity_waf(network_name, backend_container):
     default_waf_name = "modsec2-nginx"
     waf_container = prompt_for_container_name(default_waf_name)
     
-    waf_read_only = input("Should the WAF container run in read-only mode? (y/n) [n]: ").strip().lower() == "y"
+    cmd = [
+        "docker", "run", "-d",
+        "--network", network_name,
+        "--name", waf_container
+    ]
+    
+    # Enforce read-only + non-root if chosen
+    cmd = maybe_apply_read_only_and_nonroot(cmd)
+    
     host_waf_port = input("Enter host port for the WAF (default '8080'): ").strip() or "8080"
+    cmd.extend(["-p", f"{host_waf_port}:8080"])
     
     tz = os.environ.get("TZ", "UTC")
     waf_env = [
@@ -757,22 +824,12 @@ def deploy_modsecurity_waf(network_name, backend_container):
         "MODSEC_RESP_BODY_MIMETYPE=text/plain text/html text/xml application/json",
         "COMBINED_FILE_SIZES=65535"
     ]
-    print(f"[INFO] Launching ModSecurity proxy container '{waf_container}' from image '{waf_image}'...")
-    
-    cmd = [
-        "docker", "run", "-d",
-        "--network", network_name,
-        "--name", waf_container,
-        "-p", f"{host_waf_port}:8080"
-    ]
     for env_var in waf_env:
         cmd.extend(["-e", env_var])
     
-    if waf_read_only:
-        cmd.append("--read-only")
-    
     cmd.append(waf_image)
     
+    print(f"[INFO] Launching ModSecurity proxy container '{waf_container}' from image '{waf_image}'...")
     try:
         subprocess.check_call(cmd)
     except subprocess.CalledProcessError as e:
@@ -801,7 +858,7 @@ def containerize_service():
         shutil.rmtree(build_context)
     os.makedirs(build_context)
     
-    # Define directories to copy: mapping subdirectory names in build context to host paths.
+    # Define directories to copy:
     directories_to_copy = {
         "var_www": "/var/www",
         "var_lib_mysql": "/var/lib/mysql",
@@ -850,8 +907,13 @@ CMD ["/usr/sbin/httpd", "-D", "FOREGROUND"]
     run_container = input("Would you like to run a container from this image? (y/n): ").strip().lower() == "y"
     if run_container:
         container_name = input("Enter a name for the container (default 'service_container'): ").strip() or "service_container"
+        cmd = ["docker", "run", "-d", "--name", container_name]
+        # Enforce read-only + non-root if chosen
+        cmd = maybe_apply_read_only_and_nonroot(cmd)
+        cmd.append(image_name)
+        
         try:
-            subprocess.check_call(["docker", "run", "-d", "--name", container_name, image_name])
+            subprocess.check_call(cmd)
             print(f"[INFO] Container '{container_name}' launched from image '{image_name}'.")
         except subprocess.CalledProcessError as e:
             print(f"[ERROR] Failed to run container '{container_name}': {e}")
@@ -938,7 +1000,136 @@ def run_integrity_check_for_all():
         print(f"[ERROR] Could not list running containers: {e}")
 
 # -------------------------------------------------
-# 9. Main Interactive Menu
+# 9. Advanced OS-Based Containerization
+# -------------------------------------------------
+
+def advanced_os_containerize_service():
+    """
+    Detect the host OS (e.g., CentOS 7), pull a matching Docker image (e.g., centos:7),
+    detect key installed packages (Apache, PHP, MariaDB, etc.) on the host,
+    install them in the container, and copy critical directories to emulate the environment
+    without relying on specialized container images like 'prestashop/prestashop'.
+    
+    This is a best-effort approach and may need customization for your environment.
+    """
+    check_all_dependencies()
+    os_name, version = detect_os()
+    base_image = map_os_to_docker_image(os_name, version)
+    print(f"[INFO] Advanced OS-based containerization. Using base image: {base_image}")
+
+    build_context = "advanced_os_build_context"
+    if os.path.exists(build_context):
+        print(f"[INFO] Removing existing build context '{build_context}'.")
+        shutil.rmtree(build_context)
+    os.makedirs(build_context)
+
+    # 1) Attempt to detect installed packages (best-effort).
+    #    For demonstration, we check for common LAMP packages.
+    #    Extend or customize as needed.
+    packages_to_install = []
+    sysname = platform.system().lower()
+
+    if sysname.startswith("linux"):
+        # We'll do a simple approach for RPM-based vs DEB-based
+        if shutil.which("rpm"):
+            # Check for some typical RPM packages
+            common_rpm_packages = ["httpd", "php", "php-mysql", "mariadb-server"]
+            for pkg in common_rpm_packages:
+                try:
+                    ret = subprocess.call(["rpm", "-q", pkg], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    if ret == 0:
+                        packages_to_install.append(pkg)
+                except:
+                    pass
+        elif shutil.which("dpkg"):
+            # Check for some typical Debian/Ubuntu packages
+            common_deb_packages = ["apache2", "php", "php-mysql", "mariadb-server"]
+            for pkg in common_deb_packages:
+                try:
+                    ret = subprocess.call(["dpkg", "-l", pkg], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    if ret == 0:
+                        packages_to_install.append(pkg)
+                except:
+                    pass
+
+    print(f"[INFO] Detected packages on host that might need installing: {packages_to_install}")
+
+    # 2) Copy critical directories
+    directories_to_copy = {
+        "var_www": "/var/www",
+        "etc_httpd": "/etc/httpd",
+        # Add more as needed
+    }
+    for subdir, src in directories_to_copy.items():
+        dest = os.path.join(build_context, subdir)
+        if os.path.exists(src):
+            try:
+                print(f"[INFO] Copying '{src}' to build context as '{dest}'.")
+                shutil.copytree(src, dest)
+            except Exception as e:
+                print(f"[WARN] Failed to copy {src}: {e}")
+        else:
+            print(f"[WARN] Source directory {src} does not exist. Skipping.")
+
+    # 3) Generate Dockerfile
+    dockerfile_path = os.path.join(build_context, "Dockerfile")
+    install_cmd = ""
+    if packages_to_install:
+        # We do a best-effort approach for the base image
+        # If it looks like CentOS or Fedora, use yum/dnf
+        # If Debian/Ubuntu, use apt-get
+        # Otherwise, just skip
+        if "centos" in base_image or "fedora" in base_image:
+            install_cmd = f"RUN yum install -y {' '.join(packages_to_install)} && yum clean all\n"
+        elif "debian" in base_image or "ubuntu" in base_image:
+            install_cmd = f"RUN apt-get update && apt-get install -y {' '.join(packages_to_install)} && apt-get clean\n"
+
+    dockerfile_content = f"""FROM {base_image}
+
+# Install packages detected on the host (best effort)
+{install_cmd.strip()}
+
+# Copy service configuration and data
+COPY var_www/ /var/www/
+COPY etc_httpd/ /etc/httpd/
+
+# Expose typical web ports (adjust as needed)
+EXPOSE 80
+
+# Default command - if httpd is installed, try to run it
+CMD ["httpd", "-D", "FOREGROUND"]
+"""
+    with open(dockerfile_path, "w") as f:
+        f.write(dockerfile_content)
+    print(f"[INFO] Dockerfile created at {dockerfile_path}")
+
+    # 4) Build the Docker image
+    image_name = input("Enter the name for the advanced OS-based Docker image (default 'os_based_service'): ").strip() or "os_based_service"
+    try:
+        subprocess.check_call(["docker", "build", "-t", image_name, build_context])
+        print(f"[INFO] Docker image '{image_name}' built successfully.")
+    except subprocess.CalledProcessError as e:
+        print(f"[ERROR] Failed to build Docker image: {e}")
+        sys.exit(1)
+
+    # 5) Optionally run the container
+    run_container = input("Would you like to run a container from this advanced image? (y/n): ").strip().lower() == "y"
+    if run_container:
+        container_name = input("Enter a name for the container (default 'advanced_service_container'): ").strip() or "advanced_service_container"
+        cmd = ["docker", "run", "-d", "--name", container_name]
+        # Enforce read-only + non-root if chosen
+        cmd = maybe_apply_read_only_and_nonroot(cmd)
+        cmd.append(image_name)
+        try:
+            subprocess.check_call(cmd)
+            print(f"[INFO] Container '{container_name}' launched from image '{image_name}'.")
+        except subprocess.CalledProcessError as e:
+            print(f"[ERROR] Failed to run container '{container_name}': {e}")
+    else:
+        print("[INFO] Build completed. You can run the image later using 'docker run'.")
+
+# -------------------------------------------------
+# 10. Main Interactive Menu
 # -------------------------------------------------
 
 def interactive_menu():
@@ -948,13 +1139,14 @@ def interactive_menu():
     """
     while True:
         print("\n==== CCDC Container Deployment Tool ====")
-        print("1. Containerize Current Service Environment (copy /var/www, /var/lib/mysql, /etc/httpd)")
+        print("1. Containerize Current Service Environment (simple copy of /var/www, /etc/httpd, etc.)")
         print("2. Setup Docker Database (e.g., MariaDB)")
         print("3. Setup Docker WAF (e.g., ModSecurity)")
         print("4. Run Continuous Integrity Check (single or multiple containers)")
-        print("5. Deploy Entire Web Stack (DB + Web App + Optional WAF) [All-in-one]")
-        print("6. Exit")
-        choice = input("Enter your choice (1-6): ").strip()
+        print("5. Deploy Entire Web Stack (DB + Web App + Optional WAF) [LEGACY]")
+        print("6. Advanced OS-Based Containerization (migrate host OS & packages)")
+        print("7. Exit")
+        choice = input("Enter your choice (1-7): ").strip()
         
         if choice == "1":
             containerize_service()
@@ -965,20 +1157,18 @@ def interactive_menu():
         elif choice == "4":
             run_integrity_check_menu()
         elif choice == "5":
-            deploy_entire_web_stack()
+            deploy_entire_web_stack_legacy()
         elif choice == "6":
+            advanced_os_containerize_service()
+        elif choice == "7":
             print("[INFO] Exiting. Goodbye!")
             sys.exit(0)
         else:
             print("[ERROR] Invalid option. Please try again.")
 
-# -------------------------------------------------
-# 10. Main Entry Point
-# -------------------------------------------------
-
 def main():
     parser = argparse.ArgumentParser(
-        description="CCDC OS-to-Container & Integrity Tool with step-by-step options."
+        description="CCDC OS-to-Container & Integrity Tool with step-by-step options, read-only+non-root fixes, and advanced OS-based containerization."
     )
     parser.add_argument("--menu", action="store_true", help="Launch interactive menu")
     args = parser.parse_args()
