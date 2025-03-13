@@ -591,7 +591,8 @@ def deploy_web_stack():
 def deploy_modsecurity_waf(network_name, backend_container):
     """
     Deploy a ModSecurity-enabled reverse proxy container on the specified network,
-    linking it to the given backend container. Defaults to not read-only.
+    linking it to the host's port 80. This configuration forces the WAF to always
+    pull whatever is running on port 80 on the host machine.
     """
     waf_image = "owasp/modsecurity-crs:nginx"
     pull_docker_image(waf_image)
@@ -605,10 +606,11 @@ def deploy_modsecurity_waf(network_name, backend_container):
     host_waf_port = input("Enter host port for the WAF (default '8080'): ").strip() or "8080"
     
     tz = os.environ.get("TZ", "UTC")
+    # Set BACKEND to always point to the host's port 80
     waf_env = [
         "PORT=8080",
         "PROXY=1",
-        f"BACKEND=http://{backend_container}:80",
+        "BACKEND=http://host.docker.internal:80",
         "MODSEC_RULE_ENGINE=on",
         "BLOCKING_PARANOIA=4",
         f"TZ={tz}",
@@ -625,6 +627,11 @@ def deploy_modsecurity_waf(network_name, backend_container):
         "--name", waf_container,
         "-p", f"{host_waf_port}:8080"
     ]
+    
+    # For Linux, add host mapping for host.docker.internal
+    if platform.system().lower() == "linux":
+        cmd.extend(["--add-host", "host.docker.internal:host-gateway"])
+    
     for env_var in waf_env:
         cmd.extend(["-e", env_var])
     
