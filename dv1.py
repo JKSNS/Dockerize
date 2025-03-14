@@ -2,11 +2,20 @@
 """
 ccdc_integrity_tool.py
 
-Key changes:
-- Auto-install Docker Compose on Linux if missing.
-- Force noninteractive package installation (DEBIAN_FRONTEND=noninteractive, TZ=America/Denver)
-  so we don't get stuck at tzdata or other geographic prompts.
-- Everything defaults to US: specifically "America/Denver" for the timezone.
+Now skips missing directories gracefully:
+- We only COPY directories in the Dockerfile if they actually exist in the build context.
+
+Includes additional critical directories:
+- /var/lib/mysql
+- /etc/httpd
+- /etc/apache2
+- /var/www/html
+- /etc/php
+- /etc/ssl
+- /var/log/apache2
+- /var/log/httpd
+
+If a directory doesn't exist on the host, we skip it entirely (no COPY line), so the Docker build won't fail.
 """
 
 import sys
@@ -851,10 +860,8 @@ def deploy_modsecurity_waf(network_name, backend_container):
 
 def containerize_service():
     """
-    Encapsulate the current service (with its dependencies and configuration)
-    into a Docker container by copying key directories (/var/www, /var/lib/mysql, /etc/httpd)
-    into a build context, generating a Dockerfile, building the image, and optionally running a container.
-    We'll also set DEBIAN_FRONTEND=noninteractive and TZ=America/Denver in the Dockerfile to avoid prompts.
+    Encapsulate the current service into a Docker container by copying directories
+    and generating a Dockerfile. We skip directories that don't exist, so Docker won't fail.
     """
     check_all_dependencies()
     
@@ -869,18 +876,28 @@ def containerize_service():
         shutil.rmtree(build_context)
     os.makedirs(build_context)
     
-    # Define directories to copy:
+    # Additional critical directories for web services:
     directories_to_copy = {
-        "var_www": "/var/www",
         "var_lib_mysql": "/var/lib/mysql",
-        "etc_httpd": "/etc/httpd"
+        "etc_httpd": "/etc/httpd",
+        "etc_apache2": "/etc/apache2",
+        "var_www_html": "/var/www/html",
+        "etc_php": "/etc/php",
+        "etc_ssl": "/etc/ssl",
+        "var_log_apache2": "/var/log/apache2",
+        "var_log_httpd": "/var/log/httpd"
     }
+    
+    # We'll track which subdirs actually got copied
+    copied_subdirs = []
+    
     for subdir, src in directories_to_copy.items():
-        dest = os.path.join(build_context, subdir)
         if os.path.exists(src):
+            dest = os.path.join(build_context, subdir)
             try:
                 print(f"[INFO] Copying '{src}' to build context as '{dest}'.")
                 shutil.copytree(src, dest)
+                copied_subdirs.append(subdir)
             except Exception as e:
                 print(f"[WARN] Failed to copy {src}: {e}")
         else:
@@ -888,6 +905,29 @@ def containerize_service():
     
     # Create a Dockerfile in the build context
     dockerfile_path = os.path.join(build_context, "Dockerfile")
+    
+    # We'll generate COPY lines only for subdirs we actually copied
+    copy_lines = []
+    for subdir in copied_subdirs:
+        # We'll guess the container path based on subdir
+        if subdir == "var_lib_mysql":
+            copy_lines.append(f"COPY {subdir}/ /var/lib/mysql/")
+        elif subdir == "etc_httpd":
+            copy_lines.append(f"COPY {subdir}/ /etc/httpd/")
+        elif subdir == "etc_apache2":
+            copy_lines.append(f"COPY {subdir}/ /etc/apache2/")
+        elif subdir == "var_www_html":
+            copy_lines.append(f"COPY {subdir}/ /var/www/html/")
+        elif subdir == "etc_php":
+            copy_lines.append(f"COPY {subdir}/ /etc/php/")
+        elif subdir == "etc_ssl":
+            copy_lines.append(f"COPY {subdir}/ /etc/ssl/")
+        elif subdir == "var_log_apache2":
+            copy_lines.append(f"COPY {subdir}/ /var/log/apache2/")
+        elif subdir == "var_log_httpd":
+            copy_lines.append(f"COPY {subdir}/ /var/log/httpd/")
+    
+    # Build the Dockerfile content
     dockerfile_content = f"""FROM {base_image}
 
 # Avoid interactive tzdata config
@@ -895,19 +935,21 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=America/Denver
 
 # Copy service configuration and data
-COPY var_www/ /var/www/
-COPY var_lib_mysql/ /var/lib/mysql/
-COPY etc_httpd/ /etc/httpd/
+"""
+    for line in copy_lines:
+        dockerfile_content += line + "\n"
 
+    dockerfile_content += """
 # Expose common ports (adjust as needed)
 EXPOSE 80 3306
 
-# Default command (adjust if necessary to launch your service)
+# Default command (adjust if necessary)
 CMD ["/usr/sbin/httpd", "-D", "FOREGROUND"]
 """
+
     with open(dockerfile_path, "w") as f:
         f.write(dockerfile_content)
-    print(f"[INFO] Dockerfile created at {dockerfile_path}")
+    print(f"[INFO] Dockerfile created at", dockerfile_path)
     
     # Build the Docker image
     image_name = input("Enter the name for the Docker image (default 'encapsulated_service'): ").strip() or "encapsulated_service"
@@ -1020,10 +1062,9 @@ def run_integrity_check_for_all():
 
 def advanced_os_containerize_service():
     """
-    Detect the host OS (e.g., CentOS 7), pull a matching Docker image (e.g., centos:7),
-    detect key installed packages (Apache, PHP, MariaDB, etc.) on the host,
-    install them in the container, and copy critical directories to emulate the environment
-    without relying on specialized container images. Noninteractive & TZ=America/Denver to avoid prompts.
+    Similar to containerize_service(), but attempts to detect installed packages
+    and replicate them in the container. We skip directories that don't exist,
+    so it won't fail if e.g. /etc/httpd is missing.
     """
     check_all_dependencies()
     os_name, version = detect_os()
@@ -1041,7 +1082,6 @@ def advanced_os_containerize_service():
     sysname = platform.system().lower()
 
     if sysname.startswith("linux"):
-        # We'll do a simple approach for RPM-based vs DEB-based
         if shutil.which("rpm"):
             # Check for some typical RPM packages
             common_rpm_packages = ["httpd", "php", "php-mysql", "mariadb-server"]
@@ -1067,18 +1107,26 @@ def advanced_os_containerize_service():
 
     print(f"[INFO] Detected packages on host that might need installing: {packages_to_install}")
 
-    # 2) Copy critical directories
+    # 2) Copy critical directories (skip if missing).
     directories_to_copy = {
-        "var_www": "/var/www",
+        "var_lib_mysql": "/var/lib/mysql",
         "etc_httpd": "/etc/httpd",
-        # Add more as needed
+        "etc_apache2": "/etc/apache2",
+        "var_www_html": "/var/www/html",
+        "etc_php": "/etc/php",
+        "etc_ssl": "/etc/ssl",
+        "var_log_apache2": "/var/log/apache2",
+        "var_log_httpd": "/var/log/httpd"
     }
+
+    copied_subdirs = []
     for subdir, src in directories_to_copy.items():
-        dest = os.path.join(build_context, subdir)
         if os.path.exists(src):
+            dest = os.path.join(build_context, subdir)
             try:
                 print(f"[INFO] Copying '{src}' to build context as '{dest}'.")
                 shutil.copytree(src, dest)
+                copied_subdirs.append(subdir)
             except Exception as e:
                 print(f"[WARN] Failed to copy {src}: {e}")
         else:
@@ -1086,9 +1134,6 @@ def advanced_os_containerize_service():
 
     # 3) Generate Dockerfile
     dockerfile_path = os.path.join(build_context, "Dockerfile")
-
-    # We'll set environment variables to force noninteractive mode & default to America/Denver
-    # Then do best-effort install of detected packages.
     install_cmd = ""
     if packages_to_install:
         if any(x in base_image for x in ["centos", "fedora"]):
@@ -1108,6 +1153,26 @@ def advanced_os_containerize_service():
         else:
             install_cmd = "# (No recognized distro for auto-install)"
 
+    # Generate COPY lines only for subdirs we actually copied
+    copy_lines = []
+    for subdir in copied_subdirs:
+        if subdir == "var_lib_mysql":
+            copy_lines.append("COPY var_lib_mysql/ /var/lib/mysql/")
+        elif subdir == "etc_httpd":
+            copy_lines.append("COPY etc_httpd/ /etc/httpd/")
+        elif subdir == "etc_apache2":
+            copy_lines.append("COPY etc_apache2/ /etc/apache2/")
+        elif subdir == "var_www_html":
+            copy_lines.append("COPY var_www_html/ /var/www/html/")
+        elif subdir == "etc_php":
+            copy_lines.append("COPY etc_php/ /etc/php/")
+        elif subdir == "etc_ssl":
+            copy_lines.append("COPY etc_ssl/ /etc/ssl/")
+        elif subdir == "var_log_apache2":
+            copy_lines.append("COPY var_log_apache2/ /var/log/apache2/")
+        elif subdir == "var_log_httpd":
+            copy_lines.append("COPY var_log_httpd/ /var/log/httpd/")
+
     dockerfile_content = f"""FROM {base_image}
 
 # Avoid interactive tzdata config
@@ -1117,18 +1182,21 @@ ENV TZ=America/Denver
 {install_cmd}
 
 # Copy service configuration and data
-COPY var_www/ /var/www/
-COPY etc_httpd/ /etc/httpd/
+"""
+    for line in copy_lines:
+        dockerfile_content += line + "\n"
 
+    dockerfile_content += """
 # Expose typical web ports (adjust as needed)
 EXPOSE 80
 
 # Default command - if httpd is installed, try to run it
 CMD ["httpd", "-D", "FOREGROUND"]
 """
+
     with open(dockerfile_path, "w") as f:
         f.write(dockerfile_content)
-    print(f"[INFO] Dockerfile created at {dockerfile_path}")
+    print(f"[INFO] Dockerfile created at", dockerfile_path)
 
     # 4) Build the Docker image
     image_name = input("Enter the name for the advanced OS-based Docker image (default 'os_based_service'): ").strip() or "os_based_service"
@@ -1165,7 +1233,7 @@ def interactive_menu():
     """
     while True:
         print("\n==== CCDC Container Deployment Tool ====")
-        print("1. Containerize Current Service Environment (simple copy of /var/www, /etc/httpd, etc.)")
+        print("1. Containerize Current Service Environment (simple copy of expanded directories)")
         print("2. Setup Docker Database (e.g., MariaDB)")
         print("3. Setup Docker WAF (e.g., ModSecurity)")
         print("4. Run Continuous Integrity Check (single or multiple containers)")
@@ -1194,7 +1262,7 @@ def interactive_menu():
 
 def main():
     parser = argparse.ArgumentParser(
-        description="CCDC OS-to-Container & Integrity Tool with step-by-step options, Docker Compose auto-install, and forced noninteractive mode (TZ=America/Denver)."
+        description="CCDC OS-to-Container & Integrity Tool with skipping missing dirs, Docker Compose auto-install, forced noninteractive, etc."
     )
     parser.add_argument("--menu", action="store_true", help="Launch interactive menu")
     args = parser.parse_args()
