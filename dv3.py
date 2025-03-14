@@ -2,19 +2,18 @@
 """
 ccdc_integrity_tool.py
 
-This script provides a 5-option interactive menu:
+Final script that:
 
-1) Containerize Current Service Environment (website-only, read-only + non-root, using existing host DB)
-2) Setup Docker Database (optional separate DB container)
-3) Setup Docker WAF (e.g., ModSecurity)
-4) Run Continuous Integrity Check
-5) Exit
+1) Ignores permission errors when removing old build context (rmtree).
+2) Ignores permission errors when copying directories (custom copy_dir_recursive).
+3) Provides a 5-option menu:
+   - Containerize current website in read-only mode (using existing host DB).
+   - Setup Docker Database (optional).
+   - Setup Docker WAF.
+   - Run Continuous Integrity Check.
+   - Exit.
 
-Key changes:
-- Containerization logic (Option 1) now uses the "website-only" approach:
-  * Copies typical web directories (Apache/PHP) while ignoring permission errors.
-  * Builds an Apache/PHP container in read-only mode.
-  * Connects to the existing host DB (no separate DB container).
+Docker + Docker Compose auto-install on Linux if missing.
 """
 
 import sys
@@ -178,10 +177,10 @@ def ensure_docker_installed():
         else:
             print("[INFO] Docker is installed and accessible on Linux now.")
     elif "bsd" in sysname:
-        print("[ERROR] Docker auto-install is not implemented for BSD in this script. Please install manually.")
+        print("[ERROR] Docker auto-install is not implemented for BSD. Please install manually.")
         sys.exit(1)
     elif "nix" in sysname:
-        print("[ERROR] Docker auto-install is not implemented for Nix in this script. Please install manually.")
+        print("[ERROR] Docker auto-install is not implemented for Nix. Please install manually.")
         sys.exit(1)
     elif sysname == "windows":
         print("[ERROR] Docker not found, and auto-install is not supported on Windows. Please install Docker or Docker Desktop manually.")
@@ -519,12 +518,60 @@ def run_integrity_check_for_all():
         print(f"[ERROR] Could not list running containers: {e}")
 
 # -------------------------------------------------
-# 5. Docker Database & WAF
+# 5. Docker DB & WAF Setup
 # -------------------------------------------------
+
+def container_exists(name):
+    """Return True if a container with the given name exists."""
+    try:
+        output = subprocess.check_output(["docker", "ps", "-a", "--format", "{{.Names}}"], text=True)
+        existing_names = output.split()
+        return name in existing_names
+    except subprocess.CalledProcessError:
+        return False
+
+def prompt_for_container_name(default_name):
+    """Prompt for container name, removing existing if needed."""
+    while True:
+        name = input(f"Enter container name (default '{default_name}'): ").strip() or default_name
+        if not container_exists(name):
+            return name
+        else:
+            print(f"[ERROR] A container named '{name}' already exists.")
+            choice = input("Options:\n"
+                           "  [R] Remove the existing container\n"
+                           "  [C] Choose another name\n"
+                           "  [X] Exit\n"
+                           "Enter your choice (R/C/X): ").strip().lower()
+            if choice == "r":
+                try:
+                    subprocess.check_call(["docker", "rm", "-f", name])
+                    print(f"[INFO] Removed container '{name}'. Now you can use that name.")
+                    return name
+                except subprocess.CalledProcessError as e:
+                    print(f"[ERROR] Could not remove container '{name}': {e}")
+            elif choice == "c":
+                continue
+            else:
+                print("[INFO] Exiting.")
+                sys.exit(1)
+
+def maybe_apply_read_only_and_nonroot(cmd_list):
+    """
+    If the user chooses read-only, enforce --read-only and --user nobody (on Linux).
+    If on Windows, just do --read-only.
+    """
+    read_only = input("Should this container run in read-only mode? (y/n) [n]: ").strip().lower() == "y"
+    if read_only:
+        sysname = platform.system().lower()
+        cmd_list.append("--read-only")
+        if not sysname.startswith("windows"):
+            cmd_list.extend(["--user", "nobody"])
+    return cmd_list
 
 def setup_docker_db():
     """
-    Set up a Dockerized database (e.g., MariaDB) with optional read-only + non-root.
+    Set up a Dockerized database (e.g., MariaDB).
     """
     check_all_dependencies()
     print("=== Database Container Setup ===")
@@ -549,7 +596,6 @@ def setup_docker_db():
         "docker", "run", "-d",
         "--name", db_container
     ]
-    # Choose network or default to 'bridge'
     network_name = input("Enter a Docker network name to attach (default 'bridge'): ").strip() or "bridge"
     if network_name != "bridge":
         try:
@@ -561,7 +607,6 @@ def setup_docker_db():
             subprocess.check_call(["docker", "network", "create", network_name])
         cmd.extend(["--network", network_name])
     
-    # We can ask if user wants read-only. But a DB container typically needs write access.
     cmd = maybe_apply_read_only_and_nonroot(cmd)
     
     cmd.extend(volume_opts_db)
@@ -594,7 +639,6 @@ def setup_docker_waf():
     
     host_waf_port = input("Enter host port for the WAF (default '8080'): ").strip() or "8080"
     
-    # Connect to an existing Docker network:
     network_name = input("Enter the Docker network to attach (default 'bridge'): ").strip() or "bridge"
     if network_name != "bridge":
         try:
@@ -605,7 +649,6 @@ def setup_docker_waf():
             print(f"[INFO] Creating Docker network '{network_name}'.")
             subprocess.check_call(["docker", "network", "create", network_name])
     
-    # The user must provide the backend container name or IP
     backend_container = input("Enter the backend container name or IP (default 'web_container'): ").strip() or "web_container"
     
     tz = os.environ.get("TZ", "America/Denver")
@@ -657,12 +700,12 @@ def copy_dir_recursive(src, dst):
     for root, dirs, files in os.walk(src):
         rel_path = os.path.relpath(root, src)
         target_dir = os.path.join(dst, rel_path)
-        if not os.path.exists(target_dir):
-            try:
-                os.makedirs(target_dir, exist_ok=True)
-            except PermissionError:
-                print(f"[WARN] Permission denied creating dir '{target_dir}'. Skipping.")
-                continue
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+        except PermissionError:
+            print(f"[WARN] Permission denied creating dir '{target_dir}'. Skipping.")
+            continue
+
         for f in files:
             source_file = os.path.join(root, f)
             target_file = os.path.join(target_dir, f)
@@ -676,10 +719,11 @@ def copy_dir_recursive(src, dst):
 def containerize_website_only():
     """
     Copies typical Apache/PHP directories, builds a Docker image that runs read-only + non-root,
-    and connects to the existing host DB (no DB container). 
+    and connects to the existing host DB (no DB container).
     """
     check_all_dependencies()
 
+    # Directories we want to copy
     directories_to_copy = {
         "var_lib_mysql": "/var/lib/mysql",
         "etc_httpd": "/etc/httpd",
@@ -692,10 +736,12 @@ def containerize_website_only():
     }
 
     build_context = "website_build_context"
+    # Remove old build context ignoring permission errors
     if os.path.exists(build_context):
-        print(f"[INFO] Removing old build context '{build_context}'.")
-        shutil.rmtree(build_context)
-    os.makedirs(build_context)
+        print(f"[INFO] Removing old build context '{build_context}' (ignoring permission errors).")
+        shutil.rmtree(build_context, ignore_errors=True)
+
+    os.makedirs(build_context, exist_ok=True)
 
     copied_subdirs = []
     for subdir, src in directories_to_copy.items():
@@ -803,7 +849,7 @@ def containerize_service():
     * Copies web directories while ignoring permission errors
     * Builds an Apache/PHP image
     * Connects to existing host DB
-    * Runs in read-only mode by default
+    * Runs in read-only mode automatically
     """
     containerize_website_only()
 
@@ -837,7 +883,7 @@ def interactive_menu():
 
 def main():
     parser = argparse.ArgumentParser(
-        description="CCDC Container Deployment Tool (Website-Only Container + DB + WAF + Integrity Checks)."
+        description="CCDC Container Deployment Tool (Website-Only + DB + WAF + Integrity)."
     )
     parser.add_argument("--menu", action="store_true", help="Launch interactive menu")
     args = parser.parse_args()
