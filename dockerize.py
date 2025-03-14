@@ -326,8 +326,10 @@ def map_os_to_docker_image(os_name, version):
 def option_comprehensive():
     """
     Option 1: Run comprehensive steps.
-    This performs all prerequisite checks, pulls the mapped Docker image, and runs a container
-    as a non-root user in read-only mode.
+    This performs all prerequisite checks, pulls the mapped Docker image,
+    starts a container in non-root, read-only mode,
+    copies website-related files from the host into the container,
+    and attempts to start the web server.
     """
     print("Running comprehensive steps...")
     check_all_dependencies()
@@ -344,20 +346,66 @@ def option_comprehensive():
         print(f"[ERROR] Failed to pull Docker image {image}: {e}")
         return
 
-    # Run the container as non-root and read-only.
+    # Start container in detached mode (non-root, read-only) with a dummy long-running command.
     uid = os.getuid() if hasattr(os, "getuid") else 1000
     gid = os.getgid() if hasattr(os, "getgid") else 1000
     container_name = "web_app_container"
     run_cmd = [
         "docker", "run", "-d", "--name", container_name,
         "--read-only", "--user", f"{uid}:{gid}",
-        image, "sleep", "infinity"  # Keeps container running in the background
+        image, "sleep", "infinity"
     ]
     try:
         subprocess.check_call(run_cmd)
         print(f"[INFO] Docker container '{container_name}' started successfully with image {image}.")
     except subprocess.CalledProcessError as e:
         print(f"[ERROR] Failed to run Docker container: {e}")
+        return
+
+    # List of common website directories on the host to be ported over.
+    website_files = {
+        "var_lib_mysql": "/var/lib/mysql",
+        "etc_httpd": "/etc/httpd",
+        "etc_apache2": "/etc/apache2",
+        "var_www_html": "/var/www/html",
+        "etc_php": "/etc/php",
+        "etc_ssl": "/etc/ssl",
+        "var_log_apache2": "/var/log/apache2",
+        "var_log_httpd": "/var/log/httpd"
+    }
+
+    # Copy any existing website directories into the container.
+    for label, host_path in website_files.items():
+        if os.path.exists(host_path):
+            print(f"[INFO] Found '{host_path}'. Copying to container '{container_name}'...")
+            try:
+                subprocess.check_call(["docker", "cp", host_path, f"{container_name}:{host_path}"])
+                print(f"[INFO] Successfully copied '{host_path}' to container.")
+            except subprocess.CalledProcessError as e:
+                print(f"[ERROR] Failed to copy '{host_path}' to container: {e}")
+        else:
+            print(f"[WARN] Path '{host_path}' not found on host. Skipping.")
+
+    # Attempt to start the web server inside the container.
+    print("[INFO] Attempting to start the web server inside the container...")
+    try:
+        # Check for Apache2 configuration
+        ret = subprocess.run(["docker", "exec", container_name, "test", "-d", "/etc/apache2"],
+                             stdout=subprocess.DEVNULL)
+        if ret.returncode == 0:
+            print("[INFO] Detected Apache2 configuration. Starting Apache2...")
+            subprocess.check_call(["docker", "exec", "-d", container_name, "apache2ctl", "-DFOREGROUND"])
+        else:
+            # Check for httpd configuration
+            ret = subprocess.run(["docker", "exec", container_name, "test", "-d", "/etc/httpd"],
+                                 stdout=subprocess.DEVNULL)
+            if ret.returncode == 0:
+                print("[INFO] Detected httpd configuration. Starting httpd...")
+                subprocess.check_call(["docker", "exec", "-d", container_name, "httpd", "-DFOREGROUND"])
+            else:
+                print("[WARN] No known web server configuration detected in container. Please start your web server manually.")
+    except subprocess.CalledProcessError as e:
+        print(f"[ERROR] Failed to start web server inside container: {e}")
 
 def option_pull_docker():
     """
@@ -414,7 +462,7 @@ def option_copy_website_files():
 def main_menu():
     while True:
         print("\nMenu:")
-        print("1: Run comprehensive steps (check dependencies, pull & run container)")
+        print("1: Run comprehensive steps (dependencies, pull & run container, port website files, start web server)")
         print("2: Pull related Docker container")
         print("3: Copy website-related files into a Docker container")
         print("4: Exit")
