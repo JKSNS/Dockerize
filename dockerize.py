@@ -17,6 +17,19 @@ def get_sudo_prefix():
         return ["sudo"]
 
 # -------------------------------------------------
+# Helper: Determine target non-root UID and GID for container run
+# -------------------------------------------------
+def get_target_uid_gid():
+    """
+    If the script is run as a non-root user, use that user's UID/GID.
+    Otherwise (if run as root), default to UID=1000 and GID=1000 (adjust as needed).
+    """
+    if hasattr(os, "getuid") and os.getuid() != 0:
+        return os.getuid(), os.getgid()
+    else:
+        return 1000, 1000
+
+# -------------------------------------------------
 # 0. Root/Administrator Check
 # -------------------------------------------------
 def ensure_run_as_root():
@@ -52,6 +65,7 @@ def attempt_install_docker_linux():
     try:
         env = os.environ.copy()
         env["DEBIAN_FRONTEND"] = "noninteractive"
+        # Note: Adjust TZ as needed
         env["TZ"] = "America/Denver"
 
         if pm in ("apt", "apt-get"):
@@ -191,27 +205,39 @@ def ensure_docker_installed():
         sys.exit(1)
 
 def check_docker_compose():
-    """Check if Docker Compose is installed. If not, try to auto-install on Linux."""
+    """Check if Docker Compose is installed.
+    
+    Tries both the legacy 'docker-compose' and the integrated 'docker compose' commands.
+    If neither is found, it attempts auto-install on Linux.
+    """
     try:
         subprocess.check_call(["docker-compose", "--version"],
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        print("[INFO] Docker Compose is installed.")
+        print("[INFO] Docker Compose is installed (docker-compose).")
+        return
     except Exception:
-        print("[WARN] Docker Compose not found. Attempting auto-install (Linux only).")
-        sysname = platform.system().lower()
-        if sysname.startswith("linux"):
-            installed = attempt_install_docker_compose_linux()
-            if installed:
-                try:
-                    subprocess.check_call(["docker-compose", "--version"],
-                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    print("[INFO] Docker Compose installed successfully.")
-                except Exception:
-                    print("[ERROR] Docker Compose still not available after attempted install.")
+        print("[WARN] 'docker-compose' command not found. Trying 'docker compose'...")
+        try:
+            subprocess.check_call(["docker", "compose", "version"],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            print("[INFO] Docker Compose is available as 'docker compose'.")
+            return
+        except Exception:
+            print("[WARN] Docker Compose not found. Attempting auto-install (Linux only).")
+            sysname = platform.system().lower()
+            if sysname.startswith("linux"):
+                installed = attempt_install_docker_compose_linux()
+                if installed:
+                    try:
+                        subprocess.check_call(["docker-compose", "--version"],
+                                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        print("[INFO] Docker Compose installed successfully.")
+                    except Exception:
+                        print("[ERROR] Docker Compose still not available after attempted install.")
+                else:
+                    print("[ERROR] Could not auto-install Docker Compose on Linux. Please install manually.")
             else:
-                print("[ERROR] Could not auto-install Docker Compose on Linux. Please install manually.")
-        else:
-            print("[ERROR] Docker Compose not found, and auto-install is only supported on Linux. Please install manually.")
+                print("[ERROR] Docker Compose not found, and auto-install is only supported on Linux. Please install manually.")
 
 def check_python_version(min_major=3, min_minor=7):
     """Ensure Python 3.7+ is being used."""
@@ -376,13 +402,14 @@ def build_and_run_readonly_container(base_image):
     """
     1) Create a container from the base image (writable).
     2) Copy in host website directories (skipping special files).
-    3) (Optional) Install a web server if needed.
+    3) Optionally install a web server (supports apt-get, dnf, yum, zypper, and apk for Alpine).
     4) Commit the container as a new image.
     5) Remove the temporary container.
     6) Prompt for a port if 80 is in use, then run the new image in read-only mode,
-       with writable tmpfs mounts for logs and temp files, and running as non-root.
+       with writable tmpfs mounts for logs and temp files, running as a non-root user.
+       
+    Note: This script assumes the container's filesystem layout is compatible with host paths.
     """
-
     website_files = {
         "var_lib_mysql": "/var/lib/mysql",
         "etc_httpd": "/etc/httpd",
@@ -404,14 +431,13 @@ def build_and_run_readonly_container(base_image):
 
     print(f"[INFO] Temporary container ID: {container_id}")
 
-    # Copy host website files into the container individually,
-    # creating directory structure and skipping special files.
+    # Copy host website files into the container, preserving directory structure.
     for label, host_path in website_files.items():
         if os.path.exists(host_path):
             print(f"[INFO] Found '{host_path}'. Copying into container '{container_id}'...")
             if os.path.isdir(host_path):
                 for root, dirs, files in os.walk(host_path):
-                    # Create the directory structure inside the container
+                    # Create the directory structure inside the container.
                     try:
                         subprocess.check_call(["docker", "exec", container_id, "mkdir", "-p", root])
                     except subprocess.CalledProcessError as e:
@@ -427,7 +453,6 @@ def build_and_run_readonly_container(base_image):
                         except subprocess.CalledProcessError as e:
                             print(f"[ERROR] docker cp failed for file '{full_path}': {e}")
             else:
-                # If it's a file, copy it directly.
                 try:
                     subprocess.check_call(["docker", "cp", host_path, f"{container_id}:{host_path}"])
                     print(f"[INFO] Successfully copied file '{host_path}' to container.")
@@ -474,6 +499,14 @@ def build_and_run_readonly_container(base_image):
             installed = True
         except subprocess.CalledProcessError:
             pass
+    elif container_has_cmd(container_id, "apk"):
+        print("[INFO] Detected apk. Installing apache2 (Alpine)...")
+        try:
+            subprocess.check_call(["docker", "exec", container_id, "apk", "update"])
+            subprocess.check_call(["docker", "exec", container_id, "apk", "add", "apache2"])
+            installed = True
+        except subprocess.CalledProcessError:
+            pass
 
     if not installed:
         print("[WARN] Could not auto-install a web server (or it might already be installed).")
@@ -491,6 +524,7 @@ def build_and_run_readonly_container(base_image):
     print(f"[INFO] Removing temporary container '{container_id}'...")
     subprocess.check_call(["docker", "rm", container_id])
 
+    # Determine the host port to bind; if port 80 is in use, prompt for an alternate.
     final_port = 80
     if port_in_use(80):
         print("[WARN] Port 80 is already in use on the host. Please enter an alternate port to map, e.g. 8080.")
@@ -508,8 +542,7 @@ def build_and_run_readonly_container(base_image):
     else:
         print("[INFO] Port 80 is available on the host. Using it.")
 
-    uid = os.getuid() if hasattr(os, "getuid") else 1000
-    gid = os.getgid() if hasattr(os, "getgid") else 1000
+    uid, gid = get_target_uid_gid()
     final_container_name = "web_app_container"
     print(f"[INFO] Running final container '{final_container_name}' from image '{new_image}' in read-only mode on port {final_port}...")
     run_cmd = [
