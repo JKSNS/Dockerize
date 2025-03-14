@@ -65,7 +65,6 @@ def attempt_install_docker_linux():
     try:
         env = os.environ.copy()
         env["DEBIAN_FRONTEND"] = "noninteractive"
-        # Note: Adjust TZ as needed
         env["TZ"] = "America/Denver"
 
         if pm in ("apt", "apt-get"):
@@ -395,22 +394,25 @@ def skip_special_file(full_path):
     return False
 
 # -------------------------------------------------
-# 1. Comprehensive Option
+# 1. Comprehensive Option:
 #    Build a new image that includes host website files, then run read-only.
+#    Accommodates remapping of host paths to container paths.
 # -------------------------------------------------
 def build_and_run_readonly_container(base_image):
     """
-    1) Create a container from the base image (writable).
-    2) Copy in host website directories (skipping special files).
-    3) Optionally install a web server (supports apt-get, dnf, yum, zypper, and apk for Alpine).
-    4) Commit the container as a new image.
-    5) Remove the temporary container.
-    6) Prompt for a port if 80 is in use, then run the new image in read-only mode,
-       with writable tmpfs mounts for logs and temp files, running as a non-root user.
-       
-    Note: This script assumes the container's filesystem layout is compatible with host paths.
+    1) Create a writable container from the base image.
+    2) For each website-related path, prompt the user for a container destination (defaulting to the host path).
+    3) Copy files from the host to the container using the remapped paths.
+    4) Optionally install a web server (supports apt-get, dnf, yum, zypper, and apk for Alpine).
+    5) Commit the container as a new image.
+    6) Remove the temporary container.
+    7) Prompt for a port if 80 is in use, then run the new image in read-only mode with tmpfs mounts,
+       running as a non-root user.
+    
+    Note: This assumes that the container’s filesystem layout can be remapped via user input.
     """
-    website_files = {
+    # Define default host paths for common website files.
+    default_website_files = {
         "var_lib_mysql": "/var/lib/mysql",
         "etc_httpd": "/etc/httpd",
         "etc_apache2": "/etc/apache2",
@@ -420,6 +422,15 @@ def build_and_run_readonly_container(base_image):
         "var_log_apache2": "/var/log/apache2",
         "var_log_httpd": "/var/log/httpd"
     }
+
+    # Build mapping dictionary by prompting the user for container destination paths.
+    path_mappings = {}
+    print("[INFO] Please review and, if necessary, adjust the container destination for each host path.")
+    for label, host_path in default_website_files.items():
+        container_default = host_path
+        response = input(f"Enter container destination for host path '{host_path}' (default: {container_default}): ").strip()
+        container_path = response if response else container_default
+        path_mappings[label] = {"host": host_path, "container": container_path}
 
     print(f"[INFO] Creating a temporary container from '{base_image}'...")
     create_cmd = ["docker", "create", base_image, "bash", "-c", "sleep infinity"]
@@ -431,39 +442,48 @@ def build_and_run_readonly_container(base_image):
 
     print(f"[INFO] Temporary container ID: {container_id}")
 
-    # Copy host website files into the container, preserving directory structure.
-    for label, host_path in website_files.items():
+    # Copy host website files into the container using the mapping.
+    for label, mapping in path_mappings.items():
+        host_path = mapping["host"]
+        container_path = mapping["container"]
         if os.path.exists(host_path):
-            print(f"[INFO] Found '{host_path}'. Copying into container '{container_id}'...")
+            print(f"[INFO] Found host path '{host_path}'. Copying to container destination '{container_path}'...")
             if os.path.isdir(host_path):
+                # Walk through directory, create corresponding directories and copy files.
                 for root, dirs, files in os.walk(host_path):
-                    # Create the directory structure inside the container.
+                    # Compute relative path from host_path.
+                    rel_path = os.path.relpath(root, start=host_path)
+                    dest_dir = container_path if rel_path == "." else os.path.join(container_path, rel_path)
                     try:
-                        subprocess.check_call(["docker", "exec", container_id, "mkdir", "-p", root])
+                        subprocess.check_call(["docker", "exec", container_id, "mkdir", "-p", dest_dir])
                     except subprocess.CalledProcessError as e:
-                        print(f"[ERROR] Failed to create directory '{root}' in container: {e}")
+                        print(f"[ERROR] Failed to create directory '{dest_dir}' in container: {e}")
                     for f in files:
-                        full_path = os.path.join(root, f)
-                        if skip_special_file(full_path):
-                            print(f"[WARN] Skipping special file '{full_path}'")
+                        src_file = os.path.join(root, f)
+                        rel_file = os.path.relpath(src_file, start=host_path)
+                        dest_file = os.path.join(container_path, rel_file)
+                        if skip_special_file(src_file):
+                            print(f"[WARN] Skipping special file '{src_file}'")
                             continue
                         try:
-                            subprocess.check_call(["docker", "cp", full_path, f"{container_id}:{full_path}"])
-                            print(f"[INFO] Copied file '{full_path}'")
+                            subprocess.check_call(["docker", "cp", src_file, f"{container_id}:{dest_file}"])
+                            print(f"[INFO] Copied '{src_file}' to '{dest_file}'")
                         except subprocess.CalledProcessError as e:
-                            print(f"[ERROR] docker cp failed for file '{full_path}': {e}")
+                            print(f"[ERROR] docker cp failed for file '{src_file}': {e}")
             else:
+                # For single files, copy directly.
                 try:
-                    subprocess.check_call(["docker", "cp", host_path, f"{container_id}:{host_path}"])
-                    print(f"[INFO] Successfully copied file '{host_path}' to container.")
+                    subprocess.check_call(["docker", "cp", host_path, f"{container_id}:{container_path}"])
+                    print(f"[INFO] Successfully copied file '{host_path}' to container at '{container_path}'.")
                 except subprocess.CalledProcessError as e:
                     print(f"[ERROR] docker cp failed for file '{host_path}': {e}")
         else:
-            print(f"[WARN] Path '{host_path}' not found on host. Skipping.")
+            print(f"[WARN] Host path '{host_path}' not found. Skipping.")
 
     print("[INFO] Attempting to install a web server in the container (best-effort).")
     subprocess.check_call(["docker", "start", container_id])
 
+    # Helper to check if a command exists in the container.
     def container_has_cmd(cid, cmd):
         test_cmd = ["docker", "exec", cid, "sh", "-c", f"command -v {cmd}"]
         return (subprocess.run(test_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0)
@@ -583,7 +603,7 @@ def option_comprehensive():
     - Check prerequisites
     - Detect host OS -> map to Docker image
     - Pull the base image
-    - Build a new image (with host web files), then run it read-only
+    - Build a new image (with host web files and remapped paths), then run it read-only
     """
     print("Running comprehensive steps...")
     check_all_dependencies()
@@ -642,7 +662,6 @@ def option_copy_website_files():
             print(f"[INFO] Found '{path}'. Copying to container '{container_id}'...")
             if os.path.isdir(path):
                 for root, dirs, files in os.walk(path):
-                    # Create directory structure in container
                     try:
                         subprocess.check_call(["docker", "exec", container_id, "mkdir", "-p", root])
                     except subprocess.CalledProcessError as e:
@@ -689,7 +708,6 @@ def option_purge_docker():
     except subprocess.CalledProcessError as e:
         print(f"[ERROR] Docker cleanup failed: {e}")
 
-    # Uninstall Docker and Docker Compose on Linux
     if platform.system().lower().startswith("linux"):
         pm = detect_linux_package_manager()
         sudo_prefix = get_sudo_prefix()
@@ -708,7 +726,6 @@ def option_purge_docker():
         else:
             print("[WARN] No supported package manager found to remove Docker.")
 
-        # Remove Docker Compose
         try:
             print("[INFO] Removing Docker Compose...")
             if shutil.which("docker-compose"):
@@ -716,12 +733,10 @@ def option_purge_docker():
                     subprocess.check_call(sudo_prefix + [pm, "remove", "-y", "docker-compose"])
                     subprocess.check_call(sudo_prefix + [pm, "autoremove", "-y"])
                 else:
-                    # Fallback: remove binary if installed manually
                     subprocess.check_call(sudo_prefix + ["rm", "-f", "$(which docker-compose)"], shell=True)
         except subprocess.CalledProcessError as e:
             print(f"[ERROR] Failed to remove Docker Compose: {e}")
 
-        # Remove common Docker directories
         docker_dirs = ["/var/lib/docker", "/etc/docker", "/var/run/docker", "/var/log/docker"]
         for d in docker_dirs:
             if os.path.exists(d):
@@ -731,7 +746,6 @@ def option_purge_docker():
                 except subprocess.CalledProcessError as e:
                     print(f"[ERROR] Failed to remove {d}: {e}")
 
-        # Remove the docker group if it exists
         try:
             print("[INFO] Removing docker group...")
             subprocess.check_call(sudo_prefix + ["groupdel", "docker"], stderr=subprocess.DEVNULL)
