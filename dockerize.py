@@ -8,6 +8,15 @@ import socket
 import stat
 
 # -------------------------------------------------
+# Helper: Get sudo prefix (empty if already root)
+# -------------------------------------------------
+def get_sudo_prefix():
+    if os.name == "posix" and hasattr(os, "geteuid") and os.geteuid() == 0:
+        return []
+    else:
+        return ["sudo"]
+
+# -------------------------------------------------
 # 0. Root/Administrator Check
 # -------------------------------------------------
 def ensure_run_as_root():
@@ -38,6 +47,7 @@ def attempt_install_docker_linux():
         print("[ERROR] No recognized package manager found on Linux. Cannot auto-install Docker.")
         return False
 
+    sudo_prefix = get_sudo_prefix()
     print(f"[INFO] Attempting to install Docker using '{pm}' on Linux...")
     try:
         env = os.environ.copy()
@@ -45,17 +55,17 @@ def attempt_install_docker_linux():
         env["TZ"] = "America/Denver"
 
         if pm in ("apt", "apt-get"):
-            subprocess.check_call(["sudo", pm, "update", "-y"], env=env)
-            subprocess.check_call(["sudo", pm, "install", "-y", "docker.io"], env=env)
+            subprocess.check_call(sudo_prefix + [pm, "update", "-y"], env=env)
+            subprocess.check_call(sudo_prefix + [pm, "install", "-y", "docker.io"], env=env)
         elif pm in ("yum", "dnf"):
-            subprocess.check_call(["sudo", pm, "-y", "install", "docker"], env=env)
-            subprocess.check_call(["sudo", "systemctl", "enable", "docker"], env=env)
-            subprocess.check_call(["sudo", "systemctl", "start", "docker"], env=env)
+            subprocess.check_call(sudo_prefix + [pm, "-y", "install", "docker"], env=env)
+            subprocess.check_call(sudo_prefix + ["systemctl", "enable", "docker"], env=env)
+            subprocess.check_call(sudo_prefix + ["systemctl", "start", "docker"], env=env)
         elif pm == "zypper":
-            subprocess.check_call(["sudo", "zypper", "refresh"], env=env)
-            subprocess.check_call(["sudo", "zypper", "--non-interactive", "install", "docker"], env=env)
-            subprocess.check_call(["sudo", "systemctl", "enable", "docker"], env=env)
-            subprocess.check_call(["sudo", "systemctl", "start", "docker"], env=env)
+            subprocess.check_call(sudo_prefix + ["zypper", "refresh"], env=env)
+            subprocess.check_call(sudo_prefix + ["zypper", "--non-interactive", "install", "docker"], env=env)
+            subprocess.check_call(sudo_prefix + ["systemctl", "enable", "docker"], env=env)
+            subprocess.check_call(sudo_prefix + ["systemctl", "start", "docker"], env=env)
         else:
             print(f"[ERROR] Package manager '{pm}' is not fully supported for auto-installation.")
             return False
@@ -76,6 +86,7 @@ def attempt_install_docker_compose_linux():
         print("[ERROR] No recognized package manager found. Cannot auto-install Docker Compose.")
         return False
 
+    sudo_prefix = get_sudo_prefix()
     print(f"[INFO] Attempting to install Docker Compose using '{pm}' on Linux...")
     try:
         env = os.environ.copy()
@@ -83,13 +94,13 @@ def attempt_install_docker_compose_linux():
         env["TZ"] = "America/Denver"
 
         if pm in ("apt", "apt-get"):
-            subprocess.check_call(["sudo", pm, "update", "-y"], env=env)
-            subprocess.check_call(["sudo", pm, "install", "-y", "docker-compose"], env=env)
+            subprocess.check_call(sudo_prefix + [pm, "update", "-y"], env=env)
+            subprocess.check_call(sudo_prefix + [pm, "install", "-y", "docker-compose"], env=env)
         elif pm in ("yum", "dnf"):
-            subprocess.check_call(["sudo", pm, "-y", "install", "docker-compose"], env=env)
+            subprocess.check_call(sudo_prefix + [pm, "-y", "install", "docker-compose"], env=env)
         elif pm == "zypper":
-            subprocess.check_call(["sudo", "zypper", "refresh"], env=env)
-            subprocess.check_call(["sudo", "zypper", "--non-interactive", "install", "docker-compose"], env=env)
+            subprocess.check_call(sudo_prefix + ["zypper", "refresh"], env=env)
+            subprocess.check_call(sudo_prefix + ["zypper", "--non-interactive", "install", "docker-compose"], env=env)
         else:
             print(f"[ERROR] Package manager '{pm}' is not fully supported for Docker Compose auto-install.")
             return False
@@ -103,40 +114,40 @@ def attempt_install_docker_compose_linux():
 def can_run_docker():
     """Return True if we can run 'docker ps' without error, else False."""
     try:
-        subprocess.check_call(["docker", "ps"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.check_call(["docker", "ps"],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return True
-    except:
+    except Exception:
         return False
 
 def fix_docker_group():
     """
-    Attempt to add the current user to the 'docker' group, enable & start Docker,
-    then re-execute the script under 'sg docker' to apply the new group membership.
+    Attempt to add the current non-root user to the 'docker' group and re-run the script.
+    If already running as root, skip this step.
     """
+    if os.name == "posix" and hasattr(os, "geteuid") and os.geteuid() == 0:
+        print("[INFO] Running as root; docker group fix is not required.")
+        return
+
     try:
         current_user = os.getlogin()
-    except:
+    except Exception:
         current_user = os.environ.get("USER", "unknown")
     print(f"[INFO] Adding user '{current_user}' to docker group.")
     try:
-        subprocess.check_call(["sudo", "usermod", "-aG", "docker", current_user])
+        subprocess.check_call(get_sudo_prefix() + ["usermod", "-aG", "docker", current_user])
     except subprocess.CalledProcessError as e:
         print(f"[WARN] Could not add user to docker group: {e}")
 
     if platform.system().lower().startswith("linux"):
         try:
-            subprocess.check_call(["sudo", "systemctl", "enable", "docker"])
-            subprocess.check_call(["sudo", "systemctl", "start", "docker"])
+            subprocess.check_call(get_sudo_prefix() + ["systemctl", "enable", "docker"])
+            subprocess.check_call(get_sudo_prefix() + ["systemctl", "start", "docker"])
         except subprocess.CalledProcessError as e:
             print(f"[WARN] Could not enable/start docker service: {e}")
 
-    print("[INFO] Re-executing script under 'sg docker' to activate group membership.")
-    os.environ["CCDC_DOCKER_GROUP_FIX"] = "1"  # Avoid infinite loops
-    script_path = os.path.abspath(sys.argv[0])
-    script_args = sys.argv[1:]
-    command_line = f'export CCDC_DOCKER_GROUP_FIX=1; exec "{sys.executable}" "{script_path}" ' + " ".join(f'"{arg}"' for arg in script_args)
-    cmd = ["sg", "docker", "-c", command_line]
-    os.execvp("sg", cmd)
+    print("[INFO] Please re-login for group changes to take effect, then re-run the script.")
+    sys.exit(1)
 
 def ensure_docker_installed():
     """
@@ -195,7 +206,7 @@ def check_docker_compose():
                     subprocess.check_call(["docker-compose", "--version"],
                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     print("[INFO] Docker Compose installed successfully.")
-                except:
+                except Exception:
                     print("[ERROR] Docker Compose still not available after attempted install.")
             else:
                 print("[ERROR] Could not auto-install Docker Compose on Linux. Please install manually.")
@@ -245,7 +256,7 @@ def detect_os():
             os_name = os_info.get("name", "linux")
             version_id = os_info.get("version_id", "")
             return os_name, version_id
-        except:
+        except Exception:
             return "linux", ""
     elif sysname.startswith("freebsd") or sysname.startswith("openbsd") or sysname.startswith("netbsd"):
         return "bsd", ""
@@ -353,7 +364,7 @@ def skip_special_file(full_path):
         mode = os.stat(full_path).st_mode
         if stat.S_ISSOCK(mode) or stat.S_ISFIFO(mode) or stat.S_ISCHR(mode) or stat.S_ISBLK(mode):
             return True
-    except:
+    except Exception:
         pass
     return False
 
@@ -368,7 +379,8 @@ def build_and_run_readonly_container(base_image):
     3) (Optional) Install a web server if needed.
     4) Commit the container as a new image.
     5) Remove the temporary container.
-    6) Prompt for a port if 80 is in use, then run the new image in read-only mode, non-root user.
+    6) Prompt for a port if 80 is in use, then run the new image in read-only mode,
+       with writable tmpfs mounts for logs and temp files, and running as non-root.
     """
 
     website_files = {
@@ -392,24 +404,39 @@ def build_and_run_readonly_container(base_image):
 
     print(f"[INFO] Temporary container ID: {container_id}")
 
+    # Copy host website files into the container individually,
+    # creating directory structure and skipping special files.
     for label, host_path in website_files.items():
         if os.path.exists(host_path):
             print(f"[INFO] Found '{host_path}'. Copying into container '{container_id}'...")
             if os.path.isdir(host_path):
                 for root, dirs, files in os.walk(host_path):
+                    # Create the directory structure inside the container
+                    try:
+                        subprocess.check_call(["docker", "exec", container_id, "mkdir", "-p", root])
+                    except subprocess.CalledProcessError as e:
+                        print(f"[ERROR] Failed to create directory '{root}' in container: {e}")
                     for f in files:
-                        full_p = os.path.join(root, f)
-                        if skip_special_file(full_p):
-                            print(f"[WARN] Skipping special file '{full_p}'")
-            try:
-                subprocess.check_call(["docker", "cp", host_path, f"{container_id}:{host_path}"])
-                print(f"[INFO] Successfully copied '{host_path}' to container.")
-            except subprocess.CalledProcessError as e:
-                print(f"[ERROR] docker cp failed for '{host_path}': {e}")
+                        full_path = os.path.join(root, f)
+                        if skip_special_file(full_path):
+                            print(f"[WARN] Skipping special file '{full_path}'")
+                            continue
+                        try:
+                            subprocess.check_call(["docker", "cp", full_path, f"{container_id}:{full_path}"])
+                            print(f"[INFO] Copied file '{full_path}'")
+                        except subprocess.CalledProcessError as e:
+                            print(f"[ERROR] docker cp failed for file '{full_path}': {e}")
+            else:
+                # If it's a file, copy it directly.
+                try:
+                    subprocess.check_call(["docker", "cp", host_path, f"{container_id}:{host_path}"])
+                    print(f"[INFO] Successfully copied file '{host_path}' to container.")
+                except subprocess.CalledProcessError as e:
+                    print(f"[ERROR] docker cp failed for file '{host_path}': {e}")
         else:
             print(f"[WARN] Path '{host_path}' not found on host. Skipping.")
 
-    print("[INFO] Installing a web server in the container (best-effort).")
+    print("[INFO] Attempting to install a web server in the container (best-effort).")
     subprocess.check_call(["docker", "start", container_id])
 
     def container_has_cmd(cid, cmd):
@@ -489,6 +516,8 @@ def build_and_run_readonly_container(base_image):
         "docker", "run", "-d",
         "--name", final_container_name,
         "--read-only",
+        "--tmpfs", "/var/log",
+        "--tmpfs", "/tmp",
         "--user", f"{uid}:{gid}",
         "-p", f"{final_port}:80",
         new_image,
@@ -578,23 +607,42 @@ def option_copy_website_files():
     for label, path in website_files.items():
         if os.path.exists(path):
             print(f"[INFO] Found '{path}'. Copying to container '{container_id}'...")
-            try:
-                subprocess.check_call(["docker", "cp", path, f"{container_id}:{path}"])
-                print(f"[INFO] Successfully copied '{path}' to container.")
-            except subprocess.CalledProcessError as e:
-                print(f"[ERROR] Failed to copy '{path}' to container: {e}")
+            if os.path.isdir(path):
+                for root, dirs, files in os.walk(path):
+                    # Create directory structure in container
+                    try:
+                        subprocess.check_call(["docker", "exec", container_id, "mkdir", "-p", root])
+                    except subprocess.CalledProcessError as e:
+                        print(f"[ERROR] Failed to create directory '{root}' in container: {e}")
+                    for f in files:
+                        full_path = os.path.join(root, f)
+                        if skip_special_file(full_path):
+                            print(f"[WARN] Skipping special file '{full_path}'")
+                            continue
+                        try:
+                            subprocess.check_call(["docker", "cp", full_path, f"{container_id}:{full_path}"])
+                            print(f"[INFO] Copied file '{full_path}'")
+                        except subprocess.CalledProcessError as e:
+                            print(f"[ERROR] Failed to copy '{full_path}' to container: {e}")
+            else:
+                try:
+                    subprocess.check_call(["docker", "cp", path, f"{container_id}:{path}"])
+                    print(f"[INFO] Successfully copied '{path}' to container.")
+                except subprocess.CalledProcessError as e:
+                    print(f"[ERROR] Failed to copy '{path}' to container: {e}")
         else:
             print(f"[WARN] Path '{path}' not found on host. Skipping.")
 
 def option_purge_docker():
     """
     Option 5: Purge Docker.
-    This will remove all Docker containers, images, volumes, and networks,
-    uninstall Docker and Docker Compose (on Linux), and remove associated files and logs.
+    This will remove all Docker containers, images, volumes, networks, uninstall Docker and Docker Compose (on Linux),
+    and remove associated files and logs.
+    WARNING: This operation is destructive and irreversible.
     """
-    print("[WARNING] Purging Docker is destructive and will remove ALL Docker data, images, containers, volumes, networks, and uninstall Docker.")
-    confirm = input("Are you sure you want to PURGE DOCKER? Type 'YES' to proceed: ").strip()
-    if confirm != "YES":
+    print("[WARNING] Purging Docker will remove ALL Docker data, images, containers, volumes, networks, and uninstall Docker.")
+    confirm = input("Type 'PURGE DOCKER' (without quotes) to proceed: ").strip()
+    if confirm != "PURGE DOCKER":
         print("[INFO] Purge cancelled.")
         return
 
@@ -611,16 +659,17 @@ def option_purge_docker():
     # Uninstall Docker and Docker Compose on Linux
     if platform.system().lower().startswith("linux"):
         pm = detect_linux_package_manager()
+        sudo_prefix = get_sudo_prefix()
         if pm:
             try:
                 print(f"[INFO] Removing Docker using {pm}...")
                 if pm in ("apt", "apt-get"):
-                    subprocess.check_call(["sudo", pm, "remove", "-y", "docker.io"])
-                    subprocess.check_call(["sudo", pm, "autoremove", "-y"])
+                    subprocess.check_call(sudo_prefix + [pm, "remove", "-y", "docker.io"])
+                    subprocess.check_call(sudo_prefix + [pm, "autoremove", "-y"])
                 elif pm in ("yum", "dnf"):
-                    subprocess.check_call(["sudo", pm, "remove", "-y", "docker"])
+                    subprocess.check_call(sudo_prefix + [pm, "remove", "-y", "docker"])
                 elif pm == "zypper":
-                    subprocess.check_call(["sudo", "zypper", "--non-interactive", "remove", "docker"])
+                    subprocess.check_call(sudo_prefix + ["zypper", "--non-interactive", "remove", "docker"])
             except subprocess.CalledProcessError as e:
                 print(f"[ERROR] Failed to remove Docker via package manager: {e}")
         else:
@@ -631,11 +680,11 @@ def option_purge_docker():
             print("[INFO] Removing Docker Compose...")
             if shutil.which("docker-compose"):
                 if pm and pm in ("apt", "apt-get"):
-                    subprocess.check_call(["sudo", pm, "remove", "-y", "docker-compose"])
-                    subprocess.check_call(["sudo", pm, "autoremove", "-y"])
+                    subprocess.check_call(sudo_prefix + [pm, "remove", "-y", "docker-compose"])
+                    subprocess.check_call(sudo_prefix + [pm, "autoremove", "-y"])
                 else:
                     # Fallback: remove binary if installed manually
-                    subprocess.check_call(["sudo", "rm", "-f", "$(which docker-compose)"], shell=True)
+                    subprocess.check_call(sudo_prefix + ["rm", "-f", "$(which docker-compose)"], shell=True)
         except subprocess.CalledProcessError as e:
             print(f"[ERROR] Failed to remove Docker Compose: {e}")
 
@@ -645,14 +694,14 @@ def option_purge_docker():
             if os.path.exists(d):
                 try:
                     print(f"[INFO] Removing directory {d}...")
-                    subprocess.check_call(["sudo", "rm", "-rf", d])
+                    subprocess.check_call(sudo_prefix + ["rm", "-rf", d])
                 except subprocess.CalledProcessError as e:
                     print(f"[ERROR] Failed to remove {d}: {e}")
 
         # Remove the docker group if it exists
         try:
             print("[INFO] Removing docker group...")
-            subprocess.check_call(["sudo", "groupdel", "docker"], stderr=subprocess.DEVNULL)
+            subprocess.check_call(sudo_prefix + ["groupdel", "docker"], stderr=subprocess.DEVNULL)
         except subprocess.CalledProcessError:
             print("[WARN] Docker group could not be removed (it may not exist).")
     else:
