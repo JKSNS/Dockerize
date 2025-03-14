@@ -16,14 +16,13 @@ def ensure_run_as_root():
     On Windows, there's no direct concept of EUID, so we skip.
     """
     if os.name == "posix":
-        # We only check this on Unix-like systems
         if hasattr(os, "geteuid") and os.geteuid() != 0:
             print("[ERROR] This script must be run as root (or with sudo).")
             print("Please re-run with sudo or switch to root user.")
             sys.exit(1)
 
 # -------------------------------------------------
-# Utility: detect Linux package manager, install Docker
+# Utility: Detect Linux package manager & install Docker/Docker Compose
 # -------------------------------------------------
 def detect_linux_package_manager():
     """Detect common Linux package managers."""
@@ -80,7 +79,7 @@ def attempt_install_docker_compose_linux():
     print(f"[INFO] Attempting to install Docker Compose using '{pm}' on Linux...")
     try:
         env = os.environ.copy()
-        env["DEBIAN_FRONTENDEND"] = "noninteractive"
+        env["DEBIAN_FRONTEND"] = "noninteractive"
         env["TZ"] = "America/Denver"
 
         if pm in ("apt", "apt-get"):
@@ -222,7 +221,7 @@ def check_wsl_if_windows():
 
 def check_all_dependencies():
     """Run all prerequisite checks."""
-    ensure_run_as_root()         # <-- Ensure running as root/sudo on Unix
+    ensure_run_as_root()         # Must run as root on Unix
     check_python_version(3, 7)
     ensure_docker_installed()
     check_docker_compose()
@@ -231,7 +230,6 @@ def check_all_dependencies():
 # -------------------------------------------------
 # OS Detection & Docker Image Mapping
 # -------------------------------------------------
-
 def detect_os():
     """Detect the host OS and version."""
     sysname = platform.system().lower()
@@ -325,7 +323,6 @@ def map_os_to_docker_image(os_name, version):
                 return img
         return "mcr.microsoft.com/windows/servercore:ltsc2019"
     else:
-        # Assume a Linux distro
         for distro, ver_map in linux_map.items():
             if distro in os_name:
                 short_ver = version.split(".")[0] if version else ""
@@ -349,15 +346,9 @@ def port_in_use(port):
     return False
 
 # -------------------------------------------------
-# 1. Comprehensive Option
-#    Build a new image that includes host website files, then run read-only.
+# Helper: Skip special files (sockets, FIFOs, devices) when copying
 # -------------------------------------------------
-
 def skip_special_file(full_path):
-    """
-    Return True if the file is a socket, FIFO, device, or other special type
-    that docker cp won't handle well. We'll skip copying it.
-    """
     try:
         mode = os.stat(full_path).st_mode
         if stat.S_ISSOCK(mode) or stat.S_ISFIFO(mode) or stat.S_ISCHR(mode) or stat.S_ISBLK(mode):
@@ -366,6 +357,10 @@ def skip_special_file(full_path):
         pass
     return False
 
+# -------------------------------------------------
+# 1. Comprehensive Option
+#    Build a new image that includes host website files, then run read-only.
+# -------------------------------------------------
 def build_and_run_readonly_container(base_image):
     """
     1) Create a container from the base image (writable).
@@ -376,7 +371,6 @@ def build_and_run_readonly_container(base_image):
     6) Prompt for a port if 80 is in use, then run the new image in read-only mode, non-root user.
     """
 
-    # Common website directories to copy from host
     website_files = {
         "var_lib_mysql": "/var/lib/mysql",
         "etc_httpd": "/etc/httpd",
@@ -388,7 +382,6 @@ def build_and_run_readonly_container(base_image):
         "var_log_httpd": "/var/log/httpd"
     }
 
-    # 1) Create a stopped container (so we can copy files in).
     print(f"[INFO] Creating a temporary container from '{base_image}'...")
     create_cmd = ["docker", "create", base_image, "bash", "-c", "sleep infinity"]
     try:
@@ -399,27 +392,15 @@ def build_and_run_readonly_container(base_image):
 
     print(f"[INFO] Temporary container ID: {container_id}")
 
-    # 2) Copy website files from host to container, skipping special files.
     for label, host_path in website_files.items():
         if os.path.exists(host_path):
             print(f"[INFO] Found '{host_path}'. Copying into container '{container_id}'...")
-            # We'll do a naive approach: if it’s a directory, copy it directly;
-            # if it has special files, the docker cp might fail. We can handle errors.
-            # If we want to skip special files, we can do a tar-based approach or partial copy.
-            # For simplicity, we’ll do a direct docker cp. If you get partial errors, ignore them.
-            # Alternatively, we can do an explicit check for special files, but that can be complex.
-            
-            # Quick check for special files (like sockets) that break docker cp
             if os.path.isdir(host_path):
-                # We can walk the directory and skip special files
-                skip_any = False
                 for root, dirs, files in os.walk(host_path):
                     for f in files:
                         full_p = os.path.join(root, f)
                         if skip_special_file(full_p):
-                            skip_any = True
-                            print(f"[WARN] Skipping special file '{full_p}' (socket, device, etc.)")
-                # Then do the copy
+                            print(f"[WARN] Skipping special file '{full_p}'")
             try:
                 subprocess.check_call(["docker", "cp", host_path, f"{container_id}:{host_path}"])
                 print(f"[INFO] Successfully copied '{host_path}' to container.")
@@ -428,7 +409,6 @@ def build_and_run_readonly_container(base_image):
         else:
             print(f"[WARN] Path '{host_path}' not found on host. Skipping.")
 
-    # 3) Start container, attempt to install a web server if needed
     print("[INFO] Installing a web server in the container (best-effort).")
     subprocess.check_call(["docker", "start", container_id])
 
@@ -471,10 +451,8 @@ def build_and_run_readonly_container(base_image):
     if not installed:
         print("[WARN] Could not auto-install a web server (or it might already be installed).")
 
-    # Stop container before committing
     subprocess.check_call(["docker", "stop", container_id])
 
-    # 4) Commit container as new image
     new_image = "my_web_app_image"
     print(f"[INFO] Committing container '{container_id}' as image '{new_image}'...")
     try:
@@ -483,11 +461,9 @@ def build_and_run_readonly_container(base_image):
         print(f"[ERROR] Failed to commit container as new image: {e}")
         return None
 
-    # 5) Remove the temporary container
     print(f"[INFO] Removing temporary container '{container_id}'...")
     subprocess.check_call(["docker", "rm", container_id])
 
-    # 6) Prompt for a port if 80 is in use, then run the new image in read-only mode, non-root user
     final_port = 80
     if port_in_use(80):
         print("[WARN] Port 80 is already in use on the host. Please enter an alternate port to map, e.g. 8080.")
@@ -524,7 +500,6 @@ def build_and_run_readonly_container(base_image):
         print(f"[ERROR] Failed to run final container: {e}")
         return
 
-    # Attempt to start Apache or httpd in background
     print("[INFO] Attempting to start Apache/httpd in the final container...")
     if container_has_cmd(final_container_name, "apache2ctl"):
         subprocess.run(["docker", "exec", "-d", final_container_name, "apache2ctl", "-DFOREGROUND"])
@@ -538,9 +513,8 @@ def build_and_run_readonly_container(base_image):
     print("[INFO] Done. Your container is running in read-only mode with your host web files baked in.")
 
 # -------------------------------------------------
-# 2. Menu Options
+# 2. Menu Option Functions
 # -------------------------------------------------
-
 def option_comprehensive():
     """
     Option 1:
@@ -556,7 +530,6 @@ def option_comprehensive():
     image = map_os_to_docker_image(os_name, version)
     print(f"[INFO] Mapped Docker image: {image}")
 
-    # Pull the Docker image
     print(f"[INFO] Pulling Docker image: {image}")
     try:
         subprocess.check_call(["docker", "pull", image])
@@ -584,8 +557,7 @@ def option_pull_docker():
 def option_copy_website_files():
     """
     Option 3:
-    Just copies the known website-related files from the host to a specified container.
-    This is for a user who already has a container running and wants to copy files in.
+    Copy known website-related files from the host to a specified container.
     NOTE: This will fail if the container is read-only.
     """
     website_files = {
@@ -614,10 +586,83 @@ def option_copy_website_files():
         else:
             print(f"[WARN] Path '{path}' not found on host. Skipping.")
 
+def option_purge_docker():
+    """
+    Option 5: Purge Docker.
+    This will remove all Docker containers, images, volumes, and networks,
+    uninstall Docker and Docker Compose (on Linux), and remove associated files and logs.
+    """
+    print("[WARNING] Purging Docker is destructive and will remove ALL Docker data, images, containers, volumes, networks, and uninstall Docker.")
+    confirm = input("Are you sure you want to PURGE DOCKER? Type 'YES' to proceed: ").strip()
+    if confirm != "YES":
+        print("[INFO] Purge cancelled.")
+        return
+
+    try:
+        print("[INFO] Stopping all running Docker containers...")
+        subprocess.run("docker kill $(docker ps -q)", shell=True, check=False)
+        print("[INFO] Removing all Docker containers...")
+        subprocess.run("docker rm -f $(docker ps -aq)", shell=True, check=False)
+        print("[INFO] Pruning Docker system (images, volumes, networks)...")
+        subprocess.check_call(["docker", "system", "prune", "-a", "--volumes", "-f"])
+    except subprocess.CalledProcessError as e:
+        print(f"[ERROR] Docker cleanup failed: {e}")
+
+    # Uninstall Docker and Docker Compose on Linux
+    if platform.system().lower().startswith("linux"):
+        pm = detect_linux_package_manager()
+        if pm:
+            try:
+                print(f"[INFO] Removing Docker using {pm}...")
+                if pm in ("apt", "apt-get"):
+                    subprocess.check_call(["sudo", pm, "remove", "-y", "docker.io"])
+                    subprocess.check_call(["sudo", pm, "autoremove", "-y"])
+                elif pm in ("yum", "dnf"):
+                    subprocess.check_call(["sudo", pm, "remove", "-y", "docker"])
+                elif pm == "zypper":
+                    subprocess.check_call(["sudo", "zypper", "--non-interactive", "remove", "docker"])
+            except subprocess.CalledProcessError as e:
+                print(f"[ERROR] Failed to remove Docker via package manager: {e}")
+        else:
+            print("[WARN] No supported package manager found to remove Docker.")
+
+        # Remove Docker Compose
+        try:
+            print("[INFO] Removing Docker Compose...")
+            if shutil.which("docker-compose"):
+                if pm and pm in ("apt", "apt-get"):
+                    subprocess.check_call(["sudo", pm, "remove", "-y", "docker-compose"])
+                    subprocess.check_call(["sudo", pm, "autoremove", "-y"])
+                else:
+                    # Fallback: remove binary if installed manually
+                    subprocess.check_call(["sudo", "rm", "-f", "$(which docker-compose)"], shell=True)
+        except subprocess.CalledProcessError as e:
+            print(f"[ERROR] Failed to remove Docker Compose: {e}")
+
+        # Remove common Docker directories
+        docker_dirs = ["/var/lib/docker", "/etc/docker", "/var/run/docker", "/var/log/docker"]
+        for d in docker_dirs:
+            if os.path.exists(d):
+                try:
+                    print(f"[INFO] Removing directory {d}...")
+                    subprocess.check_call(["sudo", "rm", "-rf", d])
+                except subprocess.CalledProcessError as e:
+                    print(f"[ERROR] Failed to remove {d}: {e}")
+
+        # Remove the docker group if it exists
+        try:
+            print("[INFO] Removing docker group...")
+            subprocess.check_call(["sudo", "groupdel", "docker"], stderr=subprocess.DEVNULL)
+        except subprocess.CalledProcessError:
+            print("[WARN] Docker group could not be removed (it may not exist).")
+    else:
+        print("[WARN] Purge operation is only fully supported on Linux. Please manually purge Docker on your system if needed.")
+
+    print("[INFO] Docker purge complete. Disk space should be freed.")
+
 # -------------------------------------------------
 # Main Menu
 # -------------------------------------------------
-
 def main_menu():
     while True:
         print("\nMenu:")
@@ -625,6 +670,7 @@ def main_menu():
         print("2: Pull related Docker container only")
         print("3: Copy website-related files into an existing container")
         print("4: Exit")
+        print("5: Purge Docker (destructive: remove all Docker data and uninstall Docker)")
         choice = input("Enter your choice: ").strip()
         if choice == "1":
             option_comprehensive()
@@ -632,6 +678,8 @@ def main_menu():
             option_pull_docker()
         elif choice == "3":
             option_copy_website_files()
+        elif choice == "5":
+            option_purge_docker()
         elif choice == "4":
             print("Exiting.")
             sys.exit(0)
