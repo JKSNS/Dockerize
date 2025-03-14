@@ -4,6 +4,8 @@ import sys
 import platform
 import shutil
 import subprocess
+import socket
+import stat
 
 # -------------------------------------------------
 # 0. Root/Administrator Check
@@ -19,10 +21,6 @@ def ensure_run_as_root():
             print("[ERROR] This script must be run as root (or with sudo).")
             print("Please re-run with sudo or switch to root user.")
             sys.exit(1)
-    else:
-        # On Windows, we won't forcibly check. 
-        # If you want to require Admin on Windows, you'd need a different approach.
-        pass
 
 # -------------------------------------------------
 # Utility: detect Linux package manager, install Docker
@@ -82,7 +80,7 @@ def attempt_install_docker_compose_linux():
     print(f"[INFO] Attempting to install Docker Compose using '{pm}' on Linux...")
     try:
         env = os.environ.copy()
-        env["DEBIAN_FRONTEND"] = "noninteractive"
+        env["DEBIAN_FRONTENDEND"] = "noninteractive"
         env["TZ"] = "America/Denver"
 
         if pm in ("apt", "apt-get"):
@@ -339,18 +337,43 @@ def map_os_to_docker_image(os_name, version):
         return "ubuntu:latest"
 
 # -------------------------------------------------
+# Helper: Check if port is in use
+# -------------------------------------------------
+def port_in_use(port):
+    """Return True if the given TCP port is in use on 0.0.0.0."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind(("0.0.0.0", port))
+        except OSError:
+            return True
+    return False
+
+# -------------------------------------------------
 # 1. Comprehensive Option
 #    Build a new image that includes host website files, then run read-only.
 # -------------------------------------------------
 
+def skip_special_file(full_path):
+    """
+    Return True if the file is a socket, FIFO, device, or other special type
+    that docker cp won't handle well. We'll skip copying it.
+    """
+    try:
+        mode = os.stat(full_path).st_mode
+        if stat.S_ISSOCK(mode) or stat.S_ISFIFO(mode) or stat.S_ISCHR(mode) or stat.S_ISBLK(mode):
+            return True
+    except:
+        pass
+    return False
+
 def build_and_run_readonly_container(base_image):
     """
     1) Create a container from the base image (writable).
-    2) Copy in host website directories.
-    3) (Optional) Install a web server if desired.
-    4) Commit the container as a new image (with website files).
+    2) Copy in host website directories (skipping special files).
+    3) (Optional) Install a web server if needed.
+    4) Commit the container as a new image.
     5) Remove the temporary container.
-    6) Run the new image in read-only mode, non-root user, start the web server.
+    6) Prompt for a port if 80 is in use, then run the new image in read-only mode, non-root user.
     """
 
     # Common website directories to copy from host
@@ -365,7 +388,7 @@ def build_and_run_readonly_container(base_image):
         "var_log_httpd": "/var/log/httpd"
     }
 
-    # 1) Create a stopped container (so we can copy files in)
+    # 1) Create a stopped container (so we can copy files in).
     print(f"[INFO] Creating a temporary container from '{base_image}'...")
     create_cmd = ["docker", "create", base_image, "bash", "-c", "sleep infinity"]
     try:
@@ -376,27 +399,39 @@ def build_and_run_readonly_container(base_image):
 
     print(f"[INFO] Temporary container ID: {container_id}")
 
-    # 2) Copy website files from host to container
+    # 2) Copy website files from host to container, skipping special files.
     for label, host_path in website_files.items():
         if os.path.exists(host_path):
             print(f"[INFO] Found '{host_path}'. Copying into container '{container_id}'...")
-            cp_cmd = ["docker", "cp", host_path, f"{container_id}:{host_path}"]
+            # We'll do a naive approach: if it’s a directory, copy it directly;
+            # if it has special files, the docker cp might fail. We can handle errors.
+            # If we want to skip special files, we can do a tar-based approach or partial copy.
+            # For simplicity, we’ll do a direct docker cp. If you get partial errors, ignore them.
+            # Alternatively, we can do an explicit check for special files, but that can be complex.
+            
+            # Quick check for special files (like sockets) that break docker cp
+            if os.path.isdir(host_path):
+                # We can walk the directory and skip special files
+                skip_any = False
+                for root, dirs, files in os.walk(host_path):
+                    for f in files:
+                        full_p = os.path.join(root, f)
+                        if skip_special_file(full_p):
+                            skip_any = True
+                            print(f"[WARN] Skipping special file '{full_p}' (socket, device, etc.)")
+                # Then do the copy
             try:
-                subprocess.check_call(cp_cmd)
+                subprocess.check_call(["docker", "cp", host_path, f"{container_id}:{host_path}"])
                 print(f"[INFO] Successfully copied '{host_path}' to container.")
             except subprocess.CalledProcessError as e:
-                print(f"[ERROR] Failed to copy '{host_path}' to container: {e}")
+                print(f"[ERROR] docker cp failed for '{host_path}': {e}")
         else:
             print(f"[WARN] Path '{host_path}' not found on host. Skipping.")
 
-    # 3) (Optional) Start container, install a web server if not present
-    #    We'll do a simple check: if 'apt-get' is in the container, assume Debian/Ubuntu and install 'apache2'
-    #    If 'yum' or 'dnf' is present, install 'httpd'. If 'zypper' is present, install 'apache2'.
-    #    This is just an example. 
+    # 3) Start container, attempt to install a web server if needed
     print("[INFO] Installing a web server in the container (best-effort).")
     subprocess.check_call(["docker", "start", container_id])
 
-    # Helper function to check if a command exists in container
     def container_has_cmd(cid, cmd):
         test_cmd = ["docker", "exec", cid, "sh", "-c", f"command -v {cmd}"]
         return (subprocess.run(test_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0)
@@ -452,25 +487,45 @@ def build_and_run_readonly_container(base_image):
     print(f"[INFO] Removing temporary container '{container_id}'...")
     subprocess.check_call(["docker", "rm", container_id])
 
-    # 6) Run the new image in read-only mode, as non-root, then start the web server
+    # 6) Prompt for a port if 80 is in use, then run the new image in read-only mode, non-root user
+    final_port = 80
+    if port_in_use(80):
+        print("[WARN] Port 80 is already in use on the host. Please enter an alternate port to map, e.g. 8080.")
+        while True:
+            user_port = input("Enter a port number: ").strip()
+            if user_port.isdigit():
+                p = int(user_port)
+                if not port_in_use(p):
+                    final_port = p
+                    break
+                else:
+                    print(f"[ERROR] Port {p} is also in use. Try another.")
+            else:
+                print("[ERROR] Invalid port. Please enter a number.")
+    else:
+        print("[INFO] Port 80 is available on the host. Using it.")
+
     uid = os.getuid() if hasattr(os, "getuid") else 1000
     gid = os.getgid() if hasattr(os, "getgid") else 1000
     final_container_name = "web_app_container"
-    print(f"[INFO] Running final container '{final_container_name}' from image '{new_image}' in read-only mode...")
+    print(f"[INFO] Running final container '{final_container_name}' from image '{new_image}' in read-only mode on port {final_port}...")
     run_cmd = [
         "docker", "run", "-d",
         "--name", final_container_name,
         "--read-only",
         "--user", f"{uid}:{gid}",
-        "-p", "80:80",  # Forward host port 80 to container port 80 for web access
+        "-p", f"{final_port}:80",
         new_image,
         "sleep", "infinity"
     ]
-    subprocess.check_call(run_cmd)
+    try:
+        subprocess.check_call(run_cmd)
+    except subprocess.CalledProcessError as e:
+        print(f"[ERROR] Failed to run final container: {e}")
+        return
 
     # Attempt to start Apache or httpd in background
     print("[INFO] Attempting to start Apache/httpd in the final container...")
-    # Check if /etc/apache2 or /etc/httpd is present, or simply try commands
     if container_has_cmd(final_container_name, "apache2ctl"):
         subprocess.run(["docker", "exec", "-d", final_container_name, "apache2ctl", "-DFOREGROUND"])
         print("[INFO] Started Apache2 in background.")
@@ -482,14 +537,13 @@ def build_and_run_readonly_container(base_image):
 
     print("[INFO] Done. Your container is running in read-only mode with your host web files baked in.")
 
-
 # -------------------------------------------------
 # 2. Menu Options
 # -------------------------------------------------
 
 def option_comprehensive():
     """
-    Option 1: 
+    Option 1:
     - Check prerequisites
     - Detect host OS -> map to Docker image
     - Pull the base image
@@ -529,10 +583,10 @@ def option_pull_docker():
 
 def option_copy_website_files():
     """
-    Option 3: 
+    Option 3:
     Just copies the known website-related files from the host to a specified container.
     This is for a user who already has a container running and wants to copy files in.
-    NOTE: This will fail if the container is read-only. 
+    NOTE: This will fail if the container is read-only.
     """
     website_files = {
         "var_lib_mysql": "/var/lib/mysql",
