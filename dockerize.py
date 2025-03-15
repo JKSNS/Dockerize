@@ -1,6 +1,19 @@
 #!/usr/bin/env python3
 """
 CCDC Dockerization – Comprehensive Web Service Containerization
+
+This script does the following:
+1. Ensures Docker (and Docker Compose) are installed properly—including creating the
+   docker group (if missing) and adding the current user.
+2. Provides an interactive menu with these options:
+   1. Dockerize Web Service (comprehensive): Copies website files (from /var/www/html and
+      /etc/httpd or /etc/apache2), builds a Docker image (matching the OS), stops the
+      local Apache/HTTPD service, and launches the container in secure mode (read-only, non-root).
+   2. Dockerize Database: Sets up a Dockerized DB container (MariaDB).
+   3. Dockerize WAF: Sets up a Dockerized ModSecurity WAF.
+   4. Toggle Web Container Mode: Re-launches the web container in either secure or development mode.
+   5. Run Continuous Integrity Check: Monitors running containers for filesystem changes.
+   6. Exit
 """
 
 import sys
