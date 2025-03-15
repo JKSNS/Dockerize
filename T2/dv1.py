@@ -1207,44 +1207,108 @@ CMD ["httpd", "-D", "FOREGROUND"]
             print(f"[ERROR] Failed to run container '{container_name}': {e}")
     else:
         print("[INFO] Build completed. You can run the image later using 'docker run'.")
+    def get_sudo_prefix():
+    """Return sudo prefix if available, else an empty list."""
+    return ["sudo"] if shutil.which("sudo") else []
+
+def option_purge_docker():
+    """
+    Option: Purge Docker.
+    This will remove all Docker containers, images, volumes, networks, uninstall Docker and Docker Compose (on Linux),
+    and remove associated files and logs.
+    WARNING: This operation is destructive and irreversible.
+    """
+    print("[WARNING] Purging Docker will remove ALL Docker data, images, containers, volumes, networks, and uninstall Docker.")
+    confirm = input("Type 'PURGE DOCKER' (without quotes) to proceed: ").strip()
+    if confirm != "PURGE DOCKER":
+        print("[INFO] Purge cancelled.")
+        return
+
+    try:
+        print("[INFO] Stopping all running Docker containers...")
+        subprocess.run("docker kill $(docker ps -q)", shell=True, check=False)
+        print("[INFO] Removing all Docker containers...")
+        subprocess.run("docker rm -f $(docker ps -aq)", shell=True, check=False)
+        print("[INFO] Pruning Docker system (images, volumes, networks)...")
+        subprocess.check_call(["docker", "system", "prune", "-a", "--volumes", "-f"])
+    except subprocess.CalledProcessError as e:
+        print(f"[ERROR] Docker cleanup failed: {e}")
+
+    if platform.system().lower().startswith("linux"):
+        pm = detect_linux_package_manager()
+        sudo_prefix = get_sudo_prefix()
+        if pm:
+            try:
+                print(f"[INFO] Removing Docker using {pm}...")
+                if pm in ("apt", "apt-get"):
+                    subprocess.check_call(sudo_prefix + [pm, "remove", "-y", "docker.io"])
+                    subprocess.check_call(sudo_prefix + [pm, "autoremove", "-y"])
+                elif pm in ("yum", "dnf"):
+                    subprocess.check_call(sudo_prefix + [pm, "remove", "-y", "docker"])
+                elif pm == "zypper":
+                    subprocess.check_call(sudo_prefix + ["zypper", "--non-interactive", "remove", "docker"])
+            except subprocess.CalledProcessError as e:
+                print(f"[ERROR] Failed to remove Docker via package manager: {e}")
+        else:
+            print("[WARN] No supported package manager found to remove Docker.")
+
+        try:
+            print("[INFO] Removing Docker Compose...")
+            if shutil.which("docker-compose"):
+                if pm and pm in ("apt", "apt-get"):
+                    subprocess.check_call(sudo_prefix + [pm, "remove", "-y", "docker-compose"])
+                    subprocess.check_call(sudo_prefix + [pm, "autoremove", "-y"])
+                else:
+                    subprocess.check_call(sudo_prefix + ["rm", "-f", "$(which docker-compose)"], shell=True)
+        except subprocess.CalledProcessError as e:
+            print(f"[ERROR] Failed to remove Docker Compose: {e}")
+
+        docker_dirs = ["/var/lib/docker", "/etc/docker", "/var/run/docker", "/var/log/docker"]
+        for d in docker_dirs:
+            if os.path.exists(d):
+                try:
+                    print(f"[INFO] Removing directory {d}...")
+                    subprocess.check_call(sudo_prefix + ["rm", "-rf", d])
+                except subprocess.CalledProcessError as e:
+                    print(f"[ERROR] Failed to remove {d}: {e}")
+
+        try:
+            print("[INFO] Removing docker group...")
+            subprocess.check_call(sudo_prefix + ["groupdel", "docker"], stderr=subprocess.DEVNULL)
+        except subprocess.CalledProcessError:
+            print("[WARN] Docker group could not be removed (it may not exist).")
+    else:
+        print("[WARN] Purge operation is only fully supported on Linux. Please manually purge Docker on your system if needed.")
+
+    print("[INFO] Docker purge complete. Disk space should be freed.")
 
 # -------------------------------------------------
 # 10. Main Interactive Menu
 # -------------------------------------------------
 
 def interactive_menu():
-    """
-    Display the interactive menu for each major step.
-    You can choose to run only the parts you want, one at a time.
-    """
     while True:
-        print("\n==== CCDC Container Deployment Tool ====")
-        print("1. Containerize Current Service Environment (simple copy of expanded directories)")
-        print("2. Setup Docker Database (e.g., MariaDB)")
-        print("3. Setup Docker WAF (e.g., ModSecurity)")
-        print("4. Run Continuous Integrity Check (single or multiple containers)")
-        print("5. Deploy Entire Web Stack (DB + Web App + Optional WAF) [LEGACY]")
-        print("6. Advanced OS-Based Containerization (migrate host OS & packages)")
-        print("7. Exit")
-        choice = input("Enter your choice (1-7): ").strip()
-        
+        print("\nMenu:")
+        print("1: Comprehensive (build new read-only container with host website files)")
+        print("2: Pull related Docker container only")
+        print("3: Copy website-related files into an existing container")
+        print("4: Exit")
+        print("5: Purge Docker (destructive: remove all Docker data and uninstall Docker)")
+        choice = input("Enter your choice: ").strip()
         if choice == "1":
-            containerize_service()
+            option_comprehensive()
         elif choice == "2":
-            setup_docker_db()
+            option_pull_docker()
         elif choice == "3":
-            setup_docker_waf()
-        elif choice == "4":
-            run_integrity_check_menu()
+            option_copy_website_files()
         elif choice == "5":
-            deploy_entire_web_stack_legacy()
-        elif choice == "6":
-            advanced_os_containerize_service()
-        elif choice == "7":
-            print("[INFO] Exiting. Goodbye!")
+            option_purge_docker()
+        elif choice == "4":
+            print("Exiting.")
             sys.exit(0)
         else:
-            print("[ERROR] Invalid option. Please try again.")
+            print("Invalid choice. Please try again.")
+
 
 def main():
     parser = argparse.ArgumentParser(
