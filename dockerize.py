@@ -1,21 +1,6 @@
 #!/usr/bin/env python3
 """
-ccdc_integrity_tool.py
-
-Now skips missing directories gracefully:
-- We only COPY directories in the Dockerfile if they actually exist in the build context.
-
-Includes additional critical directories:
-- /var/lib/mysql
-- /etc/httpd
-- /etc/apache2
-- /var/www/html
-- /etc/php
-- /etc/ssl
-- /var/log/apache2
-- /var/log/httpd
-
-If a directory doesn't exist on the host, we skip it entirely (no COPY line), so the Docker build won't fail.
+ccdc dockerization
 """
 
 import sys
