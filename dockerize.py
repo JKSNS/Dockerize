@@ -33,8 +33,7 @@ def create_docker_group_if_missing():
     if not group_exists("docker"):
         try:
             subprocess.check_call(["sudo", "groupadd", "docker"])
-        except subprocess.CalledProcessError as e:
-            print(f"[ERROR] Could not create 'docker' group: {e}")
+        except:
             return False
     return True
 
@@ -44,8 +43,7 @@ def add_user_to_docker_group(username):
     try:
         subprocess.check_call(["sudo", "usermod", "-aG", "docker", username])
         return True
-    except subprocess.CalledProcessError as e:
-        print(f"[ERROR] Could not add user '{username}' to 'docker' group: {e}")
+    except:
         return False
 
 def attempt_docker_service_reload():
@@ -53,25 +51,20 @@ def attempt_docker_service_reload():
         subprocess.check_call(["sudo", "systemctl", "daemon-reload"])
         subprocess.check_call(["sudo", "systemctl", "restart", "docker"])
         subprocess.check_call(["sudo", "systemctl", "is-active", "--quiet", "docker"])
-        print("[INFO] Docker service is active after forced reload/restart.")
-    except subprocess.CalledProcessError as e:
-        print(f"[ERROR] Docker service still failing after reload/restart: {e}")
+    except:
+        pass
 
 def enable_and_start_docker_service():
     if shutil.which("systemctl"):
         try:
             subprocess.check_call(["sudo", "systemctl", "enable", "docker"])
             subprocess.check_call(["sudo", "systemctl", "start", "docker"])
-        except subprocess.CalledProcessError as e:
-            print(f"[WARN] Could not enable/start Docker service via systemd: {e}")
+        except:
             attempt_docker_service_reload()
-    else:
-        print("[WARN] systemctl not found. If on WSL or non-systemd distro, start Docker manually.")
 
 def attempt_install_docker_linux():
     pm = detect_linux_package_manager()
     if not pm:
-        print("[ERROR] No recognized package manager found on Linux.")
         return False
     try:
         env = os.environ.copy()
@@ -87,8 +80,7 @@ def attempt_install_docker_linux():
             subprocess.check_call(["sudo", "zypper", "--non-interactive", "install", "docker"], env=env)
         else:
             return False
-    except subprocess.CalledProcessError as e:
-        print(f"[ERROR] Auto-installation of Docker failed: {e}")
+    except:
         return False
     if not create_docker_group_if_missing():
         return False
@@ -120,8 +112,7 @@ def attempt_install_docker_compose_linux():
         else:
             return False
         return True
-    except subprocess.CalledProcessError as e:
-        print(f"[ERROR] Auto-installation of Docker Compose failed: {e}")
+    except:
         return False
 
 def can_run_docker():
@@ -132,7 +123,6 @@ def can_run_docker():
         return False
 
 def reexec_with_docker_group():
-    print("[INFO] Re-executing script under 'sg docker'.")
     os.environ["CCDC_DOCKER_GROUP_FIX"] = "1"
     script_path = os.path.abspath(sys.argv[0])
     script_args = sys.argv[1:]
@@ -163,10 +153,6 @@ def ensure_docker_installed():
                 sys.exit(1)
             if not can_run_docker():
                 reexec_with_docker_group()
-        elif "bsd" in sysname or "nix" in sysname:
-            sys.exit(1)
-        elif sysname == "windows":
-            sys.exit(1)
         else:
             sys.exit(1)
 
@@ -181,8 +167,6 @@ def check_docker_compose():
                     subprocess.check_call(["docker-compose", "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 except:
                     pass
-        else:
-            pass
 
 def check_python_version(min_major=3, min_minor=7):
     if sys.version_info < (min_major, min_minor):
@@ -268,8 +252,8 @@ def map_os_to_docker_image(os_name, version):
 def pull_docker_image(image):
     try:
         subprocess.check_call(["docker", "pull", image])
-    except subprocess.CalledProcessError as e:
-        print(f"[ERROR] Could not pull image '{image}': {e}")
+    except:
+        pass
 
 def compute_container_hash(container_name):
     try:
@@ -293,8 +277,8 @@ def restore_container_from_snapshot(snapshot_tar, container_name):
         os_name, _ = detect_os()
         user = "nonroot" if os_name == "windows" else "nobody"
         subprocess.check_call(["docker", "run", "-d", "--read-only", "--user", user, "--name", container_name, image_name])
-    except subprocess.CalledProcessError as e:
-        print(f"[ERROR] Could not restore container '{container_name}': {e}")
+    except:
+        pass
 
 def continuous_integrity_check(container_name, snapshot_tar, check_interval=30):
     baseline_hash = compute_container_hash(container_name)
@@ -378,23 +362,33 @@ def dockerize_web_service_comprehensive():
         install_cmd = (
             "RUN apt-get update && "
             "DEBIAN_FRONTEND=noninteractive TZ=America/Denver "
-            "apt-get install -y apache2"
+            "apt-get install -y apache2 && "
+            "apt-get clean && "
+            "rm -rf /var/lib/apt/lists/* && "
+            "mkdir -p /var/run/apache2 /var/lock/apache2"
         )
         cmd_statement = 'CMD ["apache2ctl", "-D", "FOREGROUND"]'
     elif pm in ("yum", "dnf"):
-        install_cmd = "RUN yum -y install httpd"
+        install_cmd = (
+            "RUN yum -y install httpd && "
+            "mkdir -p /run/httpd"
+        )
         cmd_statement = 'CMD ["/usr/sbin/httpd", "-D", "FOREGROUND"]'
     elif pm == "zypper":
         install_cmd = (
             "RUN zypper refresh && "
-            "zypper --non-interactive install apache2"
+            "zypper --non-interactive install apache2 && "
+            "mkdir -p /var/run/apache2"
         )
         cmd_statement = 'CMD ["apache2ctl", "-D", "FOREGROUND"]'
     else:
         install_cmd = (
             "RUN apt-get update && "
             "DEBIAN_FRONTEND=noninteractive TZ=America/Denver "
-            "apt-get install -y apache2"
+            "apt-get install -y apache2 && "
+            "apt-get clean && "
+            "rm -rf /var/lib/apt/lists/* && "
+            "mkdir -p /var/run/apache2 /var/lock/apache2"
         )
         cmd_statement = 'CMD ["apache2ctl", "-D", "FOREGROUND"]'
     build_context = "web_service_build_context"
@@ -619,8 +613,6 @@ def interactive_menu():
             run_integrity_check_menu()
         elif choice == "6":
             sys.exit(0)
-        else:
-            pass
 
 def main():
     parser = argparse.ArgumentParser()
