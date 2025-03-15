@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 CCDC Dockerization – Comprehensive Script
+
 """
 
 import sys
@@ -588,7 +589,8 @@ EXPOSE 80
         f.write(dockerfile_content)
     print(f"[INFO] Dockerfile created at {dockerfile_path}")
 
-    image_name = input("Enter the name for the web service image (default 'web_service_image'): ").strip() or "web_service_image"
+    # The default image name is now "docker_blueprint"
+    image_name = input("Enter the name for the web service image (default 'docker_blueprint'): ").strip() or "docker_blueprint"
     try:
         subprocess.check_call(["docker", "build", "-t", image_name, build_context])
         print(f"[INFO] Docker image '{image_name}' built successfully.")
@@ -599,8 +601,8 @@ EXPOSE 80
     # Stop local Apache/httpd service
     stop_local_web_service()
 
-    # Prompt user for container name
-    container_name = prompt_for_container_name("web_service_container")
+    # The default container name is now "web_app"
+    container_name = prompt_for_container_name("web_app")
     # Always run in read-only, non-root by default
     cmd = ["docker", "run", "-d", "--name", container_name, "--read-only"]
     if not platform.system().lower().startswith("windows"):
@@ -681,7 +683,7 @@ def setup_docker_waf():
         except subprocess.CalledProcessError:
             print(f"[INFO] Creating network '{network_name}'.")
             subprocess.check_call(["docker", "network", "create", network_name])
-    backend_container = input("Enter backend container name or IP (default 'web_service_container'): ").strip() or "web_service_container"
+    backend_container = input("Enter backend container name or IP (default 'web_app'): ").strip() or "web_app"
     tz = os.environ.get("TZ", "America/Denver")
     waf_env = [
         "PORT=8080",
