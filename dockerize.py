@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-ccdc dockerization
+ccdc dockerization - Updated to containerize the web application instead
+of pulling a prebuilt Prestashop (or other e-comm) container.
 """
 
 import sys
@@ -618,13 +619,112 @@ def setup_docker_waf():
         sys.exit(1)
 
 # -------------------------------------------------
-# 6. Web Stack Deployment (LEGACY)
+# 6. Web Stack Deployment (Modified Legacy Mode)
 # -------------------------------------------------
+
+def containerize_web_app():
+    """
+    Containerize the web application by copying web files and configurations
+    into a Docker image. This replaces pulling a prebuilt e-commerce container.
+    The resulting container will run the web server with the migrated files,
+    while the database remains external.
+    """
+    check_all_dependencies()
+    os_name, version = detect_os()
+    base_image = map_os_to_docker_image(os_name, version)
+    print(f"[INFO] Containerizing web app using base Docker image: {base_image}")
+
+    build_context = "web_app_build_context"
+    if os.path.exists(build_context):
+        print(f"[INFO] Removing existing build context '{build_context}'.")
+        shutil.rmtree(build_context)
+    os.makedirs(build_context)
+    
+    # Define the directories to copy: web root and common web server configurations.
+    directories_to_copy = {
+        "var_www_html": "/var/www/html",
+        "etc_httpd": "/etc/httpd",
+        "etc_apache2": "/etc/apache2"
+    }
+    
+    copied_subdirs = []
+    
+    for subdir, src in directories_to_copy.items():
+        if os.path.exists(src):
+            dest = os.path.join(build_context, subdir)
+            try:
+                print(f"[INFO] Copying '{src}' to build context as '{dest}'.")
+                shutil.copytree(src, dest)
+                copied_subdirs.append(subdir)
+            except Exception as e:
+                print(f"[WARN] Failed to copy {src}: {e}")
+        else:
+            print(f"[WARN] Source directory {src} does not exist. Skipping.")
+    
+    # Create a Dockerfile in the build context
+    dockerfile_path = os.path.join(build_context, "Dockerfile")
+    
+    # Generate COPY lines only for the subdirs that were successfully copied
+    copy_lines = []
+    if "var_www_html" in copied_subdirs:
+        copy_lines.append("COPY var_www_html/ /var/www/html/")
+    if "etc_httpd" in copied_subdirs:
+        copy_lines.append("COPY etc_httpd/ /etc/httpd/")
+    if "etc_apache2" in copied_subdirs:
+        copy_lines.append("COPY etc_apache2/ /etc/apache2/")
+    
+    dockerfile_content = f"""FROM {base_image}
+
+# Avoid interactive tzdata config
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=America/Denver
+
+# Copy web files and configurations
+"""
+    for line in copy_lines:
+        dockerfile_content += line + "\n"
+
+    dockerfile_content += """
+# Expose web port
+EXPOSE 80
+
+# Default command to start web server (adjust as necessary)
+CMD ["/usr/sbin/httpd", "-D", "FOREGROUND"]
+"""
+
+    with open(dockerfile_path, "w") as f:
+        f.write(dockerfile_content)
+    print(f"[INFO] Dockerfile created at {dockerfile_path}")
+    
+    image_name = input("Enter the name for the Docker image (default 'web_app_image'): ").strip() or "web_app_image"
+    try:
+        subprocess.check_call(["docker", "build", "-t", image_name, build_context])
+        print(f"[INFO] Docker image '{image_name}' built successfully.")
+    except subprocess.CalledProcessError as e:
+        print(f"[ERROR] Failed to build Docker image: {e}")
+        sys.exit(1)
+    
+    run_container = input("Would you like to run a container from this image? (y/n): ").strip().lower() == "y"
+    if run_container:
+        container_name = input("Enter a name for the container (default 'web_app_container'): ").strip() or "web_app_container"
+        cmd = ["docker", "run", "-d", "--name", container_name]
+        cmd = maybe_apply_read_only_and_nonroot(cmd)
+        cmd.append(image_name)
+        
+        try:
+            subprocess.check_call(cmd)
+            print(f"[INFO] Container '{container_name}' launched from image '{image_name}'.")
+        except subprocess.CalledProcessError as e:
+            print(f"[ERROR] Failed to run container '{container_name}': {e}")
+    else:
+        print("[INFO] Web app container build process completed. You can run the image later using 'docker run'.")
 
 def deploy_entire_web_stack_legacy():
     """
-    [LEGACY] Deploy a DB container (optional) + a web app container (e.g., PrestaShop) + optional ModSecurity WAF.
-    This is the old all-in-one approach.
+    [Modified Legacy Mode] Deploy a DB container (optional) and containerize the current
+    web application environment. In this mode, the web app is not pulled from a prebuilt image
+    (e.g. Prestashop) but is instead built from the host's web files using an OS-specific base image.
+    The website will leverage the DB in the underlying OS or in a separate DB container.
     """
     check_all_dependencies()
     
@@ -689,98 +789,22 @@ def deploy_entire_web_stack_legacy():
         print(f"[INFO] Launching MariaDB container '{db_container}'.")
         try:
             subprocess.check_call(cmd)
-            db_host = db_container  # We'll use the container name as the DB host inside Docker network
+            db_host = db_container  # Use container name as the DB host within Docker network
         except subprocess.CalledProcessError as e:
             print(f"[ERROR] Could not launch MariaDB container '{db_container}': {e}")
             sys.exit(1)
-    
-    # Step 3: Deploy the web app container
-    print("Select an E-Commerce platform or web service to deploy:")
-    print("1. PrestaShop")
-    print("2. OpenCart")
-    print("3. Zen Cart")
-    print("4. WordPress")
-    print("5. LAMP / XAMPP")
-    ecomm_choice = input("Enter your choice (1-5): ").strip()
-    ecomm_images = {
-        "1": ("PrestaShop", "prestashop/prestashop:latest"),
-        "2": ("OpenCart", "opencart/opencart:latest"),
-        "3": ("Zen Cart", "zencart/zencart:latest"),
-        "4": ("WordPress", "wordpress:latest"),
-        "5": ("LAMP", "linode/lamp:latest")
-    }
-    if ecomm_choice not in ecomm_images:
-        print("[ERROR] Invalid choice. Exiting.")
-        sys.exit(1)
-    service_name, service_image = ecomm_images[ecomm_choice]
-    print(f"[INFO] Selected {service_name} with image {service_image}")
-    pull_docker_image(service_image)
-    
-    default_web_name = "web_container"
-    print("=== Web Application Container Setup ===")
-    service_container = prompt_for_container_name(default_web_name)
-    
-    volume_opts_web = []
-    print("Mounting /var/www/html by default for PrestaShop/WordPress to store data.")
-    volume_opts_web.extend(["-v", f"/var/www/html:/var/www/html"])
-    
-    while True:
-        dir_input = input("Additional directories to mount into the web container (blank to finish): ").strip()
-        if not dir_input:
-            break
-        volume_opts_web.extend(["-v", f"{dir_input}:{dir_input}"])
-    
-    cmd = [
-        "docker", "run", "-d",
-        "--name", service_container,
-        "--network", network_name
-    ]
-    
-    # Enforce read-only + non-root if chosen
-    cmd = maybe_apply_read_only_and_nonroot(cmd)
-    
-    # Additional environment variables for DB
-    env_vars = []
-    if ecomm_choice == "1":
-        # PrestaShop: force auto-install so it doesn't exit
-        env_vars.extend(["-e", "PS_INSTALL_AUTO=1"])
-    
-    if dockerized_db:
-        env_vars.extend([
-            "-e", f"DB_SERVER={db_host}",
-            "-e", f"DB_USER={db_user}",
-            "-e", f"DB_PASSWORD={db_password}",
-            "-e", f"DB_NAME={db_name}"
-        ])
     else:
         db_host = input("Enter the native DB host (default 'localhost'): ").strip() or "localhost"
         db_user = input("Enter DB user (default 'root'): ").strip() or "root"
         db_password = input("Enter DB password (default 'root'): ").strip() or "root"
         db_name = input("Enter DB name (default 'prestashop'): ").strip() or "prestashop"
-        env_vars.extend([
-            "-e", f"DB_SERVER={db_host}",
-            "-e", f"DB_USER={db_user}",
-            "-e", f"DB_PASSWORD={db_password}",
-            "-e", f"DB_NAME={db_name}"
-        ])
     
-    cmd.extend(volume_opts_web)
-    cmd.extend(env_vars)
-    cmd.append(service_image)
+    # Step 3: Containerize the web application (instead of pulling a prebuilt image)
+    print("=== Web Application Containerization ===")
+    print("Containerizing the current web app environment based on the host OS and migrating web files.")
+    containerize_web_app()
     
-    print(f"[INFO] Launching service container '{service_container}' with image '{service_image}'.")
-    try:
-        subprocess.check_call(cmd)
-    except subprocess.CalledProcessError as e:
-        print(f"[ERROR] Could not launch service container '{service_container}': {e}")
-        sys.exit(1)
-    
-    # Step 4: Optionally deploy a ModSecurity WAF
-    add_waf = input("Would you like to add a ModSecurity WAF? (y/n): ").strip().lower()
-    if add_waf == "y":
-        deploy_modsecurity_waf(network_name, service_container)
-    
-    # Step 5: Offer integrity checking
+    # Step 4: Optionally offer integrity checking on the web container
     run_integrity = input("Would you like to run continuous integrity checking on the web container? (y/n): ").strip().lower()
     if run_integrity == "y":
         snapshot_tar = input("Enter the path to the snapshot .tar file for restoration: ").strip()
@@ -789,55 +813,11 @@ def deploy_entire_web_stack_legacy():
             check_interval = int(check_interval_str) if check_interval_str else 30
         except ValueError:
             check_interval = 30
-        continuous_integrity_check(service_container, snapshot_tar, check_interval)
-
-def deploy_modsecurity_waf(network_name, backend_container):
-    """
-    Deploy a ModSecurity-enabled reverse proxy container on the specified network,
-    linking it to the given backend container. Enforces read-only + non-root if chosen.
-    """
-    waf_image = "owasp/modsecurity-crs:nginx"
-    pull_docker_image(waf_image)
-    
-    print("=== ModSecurity WAF Container Setup ===")
-    default_waf_name = "modsec2-nginx"
-    waf_container = prompt_for_container_name(default_waf_name)
-    
-    cmd = [
-        "docker", "run", "-d",
-        "--network", network_name,
-        "--name", waf_container
-    ]
-    
-    # Enforce read-only + non-root if chosen
-    cmd = maybe_apply_read_only_and_nonroot(cmd)
-    
-    host_waf_port = input("Enter host port for the WAF (default '8080'): ").strip() or "8080"
-    cmd.extend(["-p", f"{host_waf_port}:8080"])
-    
-    tz = os.environ.get("TZ", "America/Denver")
-    waf_env = [
-        "PORT=8080",
-        "PROXY=1",
-        f"BACKEND=http://{backend_container}:80",
-        "MODSEC_RULE_ENGINE=on",
-        "BLOCKING_PARANOIA=4",
-        f"TZ={tz}",
-        "MODSEC_TMP_DIR=/tmp",
-        "MODSEC_RESP_BODY_ACCESS=On",
-        "MODSEC_RESP_BODY_MIMETYPE=text/plain text/html text/xml application/json",
-        "COMBINED_FILE_SIZES=65535"
-    ]
-    for env_var in waf_env:
-        cmd.extend(["-e", env_var])
-    
-    cmd.append(waf_image)
-    
-    print(f"[INFO] Launching ModSecurity proxy container '{waf_container}' from image '{waf_image}'...")
-    try:
-        subprocess.check_call(cmd)
-    except subprocess.CalledProcessError as e:
-        print(f"[ERROR] Could not launch ModSecurity proxy container '{waf_container}': {e}")
+        web_container = input("Enter the name of the web container to monitor (default 'web_app_container'): ").strip() or "web_app_container"
+        if snapshot_tar:
+            continuous_integrity_check(web_container, snapshot_tar, check_interval)
+        else:
+            minimal_integrity_check(web_container, check_interval)
 
 # -------------------------------------------------
 # 7. Containerize Current Service Environment
@@ -1222,7 +1202,7 @@ def interactive_menu():
         print("2. Setup Docker Database (e.g., MariaDB)")
         print("3. Setup Docker WAF (e.g., ModSecurity)")
         print("4. Run Continuous Integrity Check (single or multiple containers)")
-        print("5. Deploy Entire Web Stack (DB + Web App + Optional WAF) [LEGACY]")
+        print("5. Deploy Entire Web Stack (DB + Containerized Web App) [Modified Legacy]")
         print("6. Advanced OS-Based Containerization (migrate host OS & packages)")
         print("7. Exit")
         choice = input("Enter your choice (1-7): ").strip()
