@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-ccdc dockerization - Updated to containerize the web application instead
-of pulling a prebuilt Prestashop (or other e-comm) container.
+CCDC dockerization - Revised to robustly handle Docker group creation, user membership,
+and systemd-based service enablement.
 """
 
 import sys
@@ -24,8 +24,79 @@ def detect_linux_package_manager():
             return pm
     return None
 
+def group_exists(group_name):
+    """
+    Return True if the specified group exists on the system,
+    determined via 'getent group <group>'.
+    """
+    try:
+        subprocess.check_call(["getent", "group", group_name],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
+def user_in_group(username, group_name):
+    """
+    Return True if the given username is already in the specified group.
+    """
+    try:
+        groups_output = subprocess.check_output(["groups", username], text=True)
+        # "groups" output might look like: "username : username wheel docker"
+        # We'll just check if ' docker' or 'docker ' is in there
+        return group_name in groups_output.split()
+    except:
+        return False
+
+def create_docker_group_if_missing():
+    """
+    Create the 'docker' group if it does not exist.
+    """
+    if not group_exists("docker"):
+        print("[INFO] 'docker' group does not exist. Creating it now...")
+        try:
+            subprocess.check_call(["sudo", "groupadd", "docker"])
+            print("[INFO] Created 'docker' group.")
+        except subprocess.CalledProcessError as e:
+            print(f"[ERROR] Could not create 'docker' group: {e}")
+            return False
+    return True
+
+def add_user_to_docker_group(username):
+    """
+    Add the specified user to the 'docker' group, if not already a member.
+    """
+    if user_in_group(username, "docker"):
+        print(f"[INFO] User '{username}' is already in 'docker' group.")
+        return True
+    try:
+        print(f"[INFO] Adding user '{username}' to 'docker' group.")
+        subprocess.check_call(["sudo", "usermod", "-aG", "docker", username])
+        print(f"[INFO] User '{username}' added to 'docker' group successfully.")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"[ERROR] Could not add user '{username}' to 'docker' group: {e}")
+        return False
+
+def enable_and_start_docker_service():
+    """
+    Attempt to enable and start Docker via systemd if available.
+    """
+    if shutil.which("systemctl"):
+        try:
+            subprocess.check_call(["sudo", "systemctl", "enable", "docker"])
+            subprocess.check_call(["sudo", "systemctl", "start", "docker"])
+            print("[INFO] Docker service enabled and started via systemd.")
+        except subprocess.CalledProcessError as e:
+            print(f"[WARN] Could not enable/start Docker service via systemd: {e}")
+    else:
+        print("[WARN] systemctl not found. If you are on WSL or a non-systemd distro, start Docker manually.")
+
 def attempt_install_docker_linux():
-    """Attempt to install Docker on Linux using a best-effort approach."""
+    """
+    Attempt to install Docker on Linux using a best-effort approach, then
+    ensure the 'docker' group is present, add the user, enable the service, etc.
+    """
     pm = detect_linux_package_manager()
     if not pm:
         print("[ERROR] No recognized package manager found on Linux. Cannot auto-install Docker.")
@@ -42,22 +113,35 @@ def attempt_install_docker_linux():
             subprocess.check_call(["sudo", pm, "install", "-y", "docker.io"], env=env)
         elif pm in ("yum", "dnf"):
             subprocess.check_call(["sudo", pm, "-y", "install", "docker"], env=env)
-            subprocess.check_call(["sudo", "systemctl", "enable", "docker"], env=env)
-            subprocess.check_call(["sudo", "systemctl", "start", "docker"], env=env)
         elif pm == "zypper":
             subprocess.check_call(["sudo", "zypper", "refresh"], env=env)
             subprocess.check_call(["sudo", "zypper", "--non-interactive", "install", "docker"], env=env)
-            subprocess.check_call(["sudo", "systemctl", "enable", "docker"], env=env)
-            subprocess.check_call(["sudo", "systemctl", "start", "docker"], env=env)
         else:
             print(f"[ERROR] Package manager '{pm}' is not fully supported for auto-installation.")
             return False
 
         print("[INFO] Docker installation attempt completed. Checking if Docker is now available.")
-        return True
     except subprocess.CalledProcessError as e:
         print(f"[ERROR] Auto-installation of Docker on Linux failed: {e}")
         return False
+
+    # Now ensure the 'docker' group exists and the user is in it
+    if not create_docker_group_if_missing():
+        return False
+
+    # Attempt to add the current user to the docker group
+    try:
+        current_user = os.getlogin()
+    except:
+        current_user = os.environ.get("USER", "unknown")
+
+    if not add_user_to_docker_group(current_user):
+        return False
+
+    # Enable and start Docker (if systemd is available)
+    enable_and_start_docker_service()
+
+    return True
 
 def attempt_install_docker_compose_linux():
     """
@@ -102,45 +186,14 @@ def can_run_docker():
     except:
         return False
 
-def fix_docker_group():
-    """
-    Attempt to add the current user to the 'docker' group, enable & start Docker,
-    then re-exec the script under `sg docker -c "..."`.
-    """
-    try:
-        current_user = os.getlogin()
-    except:
-        current_user = os.environ.get("USER", "unknown")
-    print(f"[INFO] Adding user '{current_user}' to docker group.")
-    try:
-        subprocess.check_call(["sudo", "usermod", "-aG", "docker", current_user])
-    except subprocess.CalledProcessError as e:
-        print(f"[WARN] Could not add user to docker group: {e}")
-
-    # On Linux, attempt to enable/start Docker
-    if platform.system().lower().startswith("linux"):
-        try:
-            subprocess.check_call(["sudo", "systemctl", "enable", "docker"])
-            subprocess.check_call(["sudo", "systemctl", "start", "docker"])
-        except subprocess.CalledProcessError as e:
-            print(f"[WARN] Could not enable/start docker service: {e}")
-
-    # Re-exec with 'sg docker' to avoid dropping user into an interactive shell
-    print("[INFO] Re-executing script under 'sg docker' to activate group membership.")
-    os.environ["CCDC_DOCKER_GROUP_FIX"] = "1"  # Avoid infinite loops
-    script_path = os.path.abspath(sys.argv[0])
-    script_args = sys.argv[1:]
-    command_line = f'export CCDC_DOCKER_GROUP_FIX=1; exec "{sys.executable}" "{script_path}" ' + " ".join(f'"{arg}"' for arg in script_args)
-    cmd = ["sg", "docker", "-c", command_line]
-    os.execvp("sg", cmd)
-
 def ensure_docker_installed():
     """
     Check if Docker is installed & if the user can run it.
-    If missing, attempt auto-install. If the user isn't in docker group, fix that, then re-exec with sg.
+    If missing, attempt auto-install. If the user isn't in the docker group,
+    fix that, then re-exec with sg if necessary.
     """
+    # If we've already re-executed once under sg docker, don't do it again
     if "CCDC_DOCKER_GROUP_FIX" in os.environ:
-        # Already tried group fix once. Let's see if we can run docker now.
         if can_run_docker():
             print("[INFO] Docker is accessible now after group fix.")
             return
@@ -151,30 +204,55 @@ def ensure_docker_installed():
     docker_path = shutil.which("docker")
     if docker_path and can_run_docker():
         print("[INFO] Docker is installed and accessible.")
+        # Make sure the group is created and the user is in it, just in case
+        if not group_exists("docker"):
+            create_docker_group_if_missing()
+        try:
+            current_user = os.getlogin()
+        except:
+            current_user = os.environ.get("USER", "unknown")
+        add_user_to_docker_group(current_user)
+        enable_and_start_docker_service()
         return
-
-    sysname = platform.system().lower()
-    if sysname.startswith("linux"):
-        installed = attempt_install_docker_linux()
-        if not installed:
-            print("[ERROR] Could not auto-install Docker on Linux. Please install it manually.")
-            sys.exit(1)
-        if not can_run_docker():
-            fix_docker_group()
-        else:
-            print("[INFO] Docker is installed and accessible on Linux now.")
-    elif "bsd" in sysname:
-        print("[ERROR] Docker auto-install is not implemented for BSD in this script. Please install manually.")
-        sys.exit(1)
-    elif "nix" in sysname:
-        print("[ERROR] Docker auto-install is not implemented for Nix in this script. Please install manually.")
-        sys.exit(1)
-    elif sysname == "windows":
-        print("[ERROR] Docker not found, and auto-install is not supported on Windows. Please install Docker or Docker Desktop manually.")
-        sys.exit(1)
     else:
-        print(f"[ERROR] Unrecognized system '{sysname}'. Docker is missing. Please install it manually.")
-        sys.exit(1)
+        # Docker either not installed or not accessible
+        sysname = platform.system().lower()
+        if sysname.startswith("linux"):
+            installed = attempt_install_docker_linux()
+            if not installed:
+                print("[ERROR] Could not auto-install Docker on Linux. Please install it manually.")
+                sys.exit(1)
+
+            # If we still can't run Docker, we re-exec with 'sg docker'
+            if not can_run_docker():
+                reexec_with_docker_group()
+            else:
+                print("[INFO] Docker is installed and accessible on Linux now.")
+        elif "bsd" in sysname:
+            print("[ERROR] Docker auto-install is not implemented for BSD. Please install manually.")
+            sys.exit(1)
+        elif "nix" in sysname:
+            print("[ERROR] Docker auto-install is not implemented for Nix. Please install manually.")
+            sys.exit(1)
+        elif sysname == "windows":
+            print("[ERROR] Docker not found, and auto-install is not supported on Windows. Please install Docker or Docker Desktop manually.")
+            sys.exit(1)
+        else:
+            print(f"[ERROR] Unrecognized system '{sysname}'. Docker is missing. Please install it manually.")
+            sys.exit(1)
+
+def reexec_with_docker_group():
+    """
+    Re-exec the script under 'sg docker' to activate group membership.
+    This avoids dropping the user into an interactive shell.
+    """
+    print("[INFO] Re-executing script under 'sg docker' to activate group membership.")
+    os.environ["CCDC_DOCKER_GROUP_FIX"] = "1"  # Avoid infinite loops
+    script_path = os.path.abspath(sys.argv[0])
+    script_args = sys.argv[1:]
+    command_line = f'export CCDC_DOCKER_GROUP_FIX=1; exec "{sys.executable}" "{script_path}" ' + " ".join(f'"{arg}"' for arg in script_args)
+    cmd = ["sg", "docker", "-c", command_line]
+    os.execvp("sg", cmd)
 
 def check_docker_compose():
     """Check if Docker Compose is installed. If not, try to auto-install on Linux."""
@@ -1227,7 +1305,7 @@ def interactive_menu():
 
 def main():
     parser = argparse.ArgumentParser(
-        description="CCDC OS-to-Container & Integrity Tool with skipping missing dirs, Docker Compose auto-install, forced noninteractive, etc."
+        description="CCDC OS-to-Container & Integrity Tool with robust Docker group checks."
     )
     parser.add_argument("--menu", action="store_true", help="Launch interactive menu")
     args = parser.parse_args()
