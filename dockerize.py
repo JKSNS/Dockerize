@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CCDC Dockerization 
+CCDC Dockerization – Comprehensive Script
 """
 
 import sys
@@ -470,7 +470,6 @@ def stop_local_web_service():
     services = ["apache2", "httpd"]
     for service in services:
         try:
-            # Check if active
             subprocess.check_call(["sudo", "systemctl", "is-active", "--quiet", service])
             print(f"[INFO] Stopping local service: {service}")
             subprocess.check_call(["sudo", "systemctl", "stop", service])
@@ -486,7 +485,7 @@ def dockerize_web_service_comprehensive():
     """
     1) Checks environment
     2) Copies /var/www/html + /etc/httpd or /etc/apache2
-    3) Installs Apache inside the container (apt-get or yum, etc.)
+    3) Installs Apache inside the container
     4) Stops local Apache/HTTPD
     5) Builds image & runs container in read-only, non-root mode
     """
@@ -516,7 +515,6 @@ def dockerize_web_service_comprehensive():
             "RUN zypper refresh && "
             "zypper --non-interactive install apache2"
         )
-        # openSUSE typically has "apache2ctl"
         cmd_statement = 'CMD ["apache2ctl", "-D", "FOREGROUND"]'
     else:
         # Fallback if we can't detect
@@ -612,6 +610,7 @@ EXPOSE 80
     try:
         subprocess.check_call(cmd)
         print(f"[INFO] Web service container '{container_name}' launched in secure mode.")
+        print("[INFO] If it exits immediately, run 'docker logs <container_name>' to see any Apache config errors.")
     except subprocess.CalledProcessError as e:
         print(f"[ERROR] Failed to run container: {e}")
 
