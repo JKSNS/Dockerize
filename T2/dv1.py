@@ -1211,6 +1211,10 @@ CMD ["httpd", "-D", "FOREGROUND"]
     """Return sudo prefix if available, else an empty list."""
     return ["sudo"] if shutil.which("sudo") else []
 
+def get_sudo_prefix():
+    """Return sudo prefix if available, else an empty list."""
+    return ["sudo"] if shutil.which("sudo") else []
+
 def option_purge_docker():
     """
     Option: Purge Docker.
