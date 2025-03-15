@@ -1,19 +1,6 @@
 #!/usr/bin/env python3
 """
-CCDC Dockerization – Comprehensive Web Service Containerization
-
-This script does the following:
-1. Ensures Docker (and Docker Compose) are installed properly—including creating the
-   docker group (if missing) and adding the current user.
-2. Provides an interactive menu with these options:
-   1. Dockerize Web Service (comprehensive): Copies website files (from /var/www/html and
-      /etc/httpd or /etc/apache2), builds a Docker image (matching the OS), stops the
-      local Apache/HTTPD service, and launches the container in secure mode (read-only, non-root).
-   2. Dockerize Database: Sets up a Dockerized DB container (MariaDB).
-   3. Dockerize WAF: Sets up a Dockerized ModSecurity WAF.
-   4. Toggle Web Container Mode: Re-launches the web container in either secure or development mode.
-   5. Run Continuous Integrity Check: Monitors running containers for filesystem changes.
-   6. Exit
+CCDC Dockerization 
 """
 
 import sys
@@ -139,7 +126,7 @@ def attempt_install_docker_compose_linux():
     """
     pm = detect_linux_package_manager()
     if not pm:
-        print("[ERROR] No recognized package manager found on Linux. Cannot auto-install Docker Compose.")
+        print("[ERROR] No recognized package manager found. Cannot auto-install Docker Compose.")
         return False
     print(f"[INFO] Attempting to install Docker Compose using '{pm}' on Linux...")
     try:
@@ -339,7 +326,7 @@ def map_os_to_docker_image(os_name, version):
         return "ubuntu:latest"
 
 # -------------------------------------------------
-# 4. Container Launch & Integrity Checking (Unchanged)
+# 4. Container Launch & Integrity Checking
 # -------------------------------------------------
 
 def pull_docker_image(image):
@@ -472,17 +459,18 @@ def maybe_apply_read_only_and_nonroot(cmd_list):
     return cmd_list
 
 # -------------------------------------------------
-# 6. Dockerize Web Service (Comprehensive)
+# 6. STOP LOCAL WEB SERVICE
 # -------------------------------------------------
 
 def stop_local_web_service():
     """
-    Attempt to stop the locally running Apache/httpd service so that
-    the website is only served from the container.
+    Attempt to stop the local Apache or HTTPD service (if present),
+    so that the site is served only by Docker.
     """
     services = ["apache2", "httpd"]
     for service in services:
         try:
+            # Check if active
             subprocess.check_call(["sudo", "systemctl", "is-active", "--quiet", service])
             print(f"[INFO] Stopping local service: {service}")
             subprocess.check_call(["sudo", "systemctl", "stop", service])
@@ -490,16 +478,55 @@ def stop_local_web_service():
             pass
     print("[INFO] Local web service stopped (if it was running).")
 
+# -------------------------------------------------
+# 7. Dockerize Web Service (Comprehensive)
+# -------------------------------------------------
+
 def dockerize_web_service_comprehensive():
     """
-    Containerize the website by copying necessary web files (/var/www/html and
-    configuration directories from /etc/httpd or /etc/apache2) into a Docker image.
-    Then stop the local web server and run the container in secure mode.
+    1) Checks environment
+    2) Copies /var/www/html + /etc/httpd or /etc/apache2
+    3) Installs Apache inside the container (apt-get or yum, etc.)
+    4) Stops local Apache/HTTPD
+    5) Builds image & runs container in read-only, non-root mode
     """
     check_all_dependencies()
     os_name, version = detect_os()
     base_image = map_os_to_docker_image(os_name, version)
     print(f"[INFO] Using base image: {base_image} for web service containerization.")
+
+    # Detect which package manager we might need in the container
+    pm = detect_linux_package_manager()
+    # We'll guess the correct command & package name
+    # for installing Apache inside the container
+    install_cmd = ""
+    cmd_statement = ""
+    if pm in ("apt", "apt-get"):
+        install_cmd = (
+            "RUN apt-get update && "
+            "DEBIAN_FRONTEND=noninteractive TZ=America/Denver "
+            "apt-get install -y apache2"
+        )
+        cmd_statement = 'CMD ["apache2ctl", "-D", "FOREGROUND"]'
+    elif pm in ("yum", "dnf"):
+        install_cmd = "RUN yum -y install httpd"
+        cmd_statement = 'CMD ["/usr/sbin/httpd", "-D", "FOREGROUND"]'
+    elif pm == "zypper":
+        install_cmd = (
+            "RUN zypper refresh && "
+            "zypper --non-interactive install apache2"
+        )
+        # openSUSE typically has "apache2ctl"
+        cmd_statement = 'CMD ["apache2ctl", "-D", "FOREGROUND"]'
+    else:
+        # Fallback if we can't detect
+        print("[WARN] No recognized local package manager. Defaulting to Debian/Ubuntu approach in Dockerfile.")
+        install_cmd = (
+            "RUN apt-get update && "
+            "DEBIAN_FRONTEND=noninteractive TZ=America/Denver "
+            "apt-get install -y apache2"
+        )
+        cmd_statement = 'CMD ["apache2ctl", "-D", "FOREGROUND"]'
 
     build_context = "web_service_build_context"
     if os.path.exists(build_context):
@@ -517,7 +544,7 @@ def dockerize_web_service_comprehensive():
         dirs_to_copy["etc_apache2"] = "/etc/apache2"
 
     if not dirs_to_copy:
-        print("[ERROR] Required web directories not found.")
+        print("[ERROR] Required web directories not found (/var/www/html, /etc/httpd, or /etc/apache2).")
         return
 
     copied = []
@@ -545,16 +572,20 @@ def dockerize_web_service_comprehensive():
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=America/Denver
 
+# Install Apache in the container
+{install_cmd}
+
 # Copy website files and configurations
 """
     for line in copy_lines:
         dockerfile_content += line + "\n"
 
-    dockerfile_content += """
+    dockerfile_content += f"""
 EXPOSE 80
 
-CMD ["/usr/sbin/httpd", "-D", "FOREGROUND"]
+{cmd_statement}
 """
+
     with open(dockerfile_path, "w") as f:
         f.write(dockerfile_content)
     print(f"[INFO] Dockerfile created at {dockerfile_path}")
@@ -570,13 +601,14 @@ CMD ["/usr/sbin/httpd", "-D", "FOREGROUND"]
     # Stop local Apache/httpd service
     stop_local_web_service()
 
+    # Prompt user for container name
     container_name = prompt_for_container_name("web_service_container")
-    cmd = ["docker", "run", "-d", "--name", container_name]
-    # By default, run in secure mode
-    cmd.append("--read-only")
+    # Always run in read-only, non-root by default
+    cmd = ["docker", "run", "-d", "--name", container_name, "--read-only"]
     if not platform.system().lower().startswith("windows"):
         cmd.extend(["--user", "nobody"])
     cmd.append(image_name)
+
     try:
         subprocess.check_call(cmd)
         print(f"[INFO] Web service container '{container_name}' launched in secure mode.")
@@ -584,7 +616,7 @@ CMD ["/usr/sbin/httpd", "-D", "FOREGROUND"]
         print(f"[ERROR] Failed to run container: {e}")
 
 # -------------------------------------------------
-# 7. Dockerize Database (Using Existing Functionality)
+# 8. Dockerize Database
 # -------------------------------------------------
 
 def setup_docker_db():
@@ -616,6 +648,7 @@ def setup_docker_db():
             print(f"[INFO] Creating network '{network_name}'.")
             subprocess.check_call(["docker", "network", "create", network_name])
         cmd.extend(["--network", network_name])
+    # Let user pick read-only or not
     cmd = maybe_apply_read_only_and_nonroot(cmd)
     cmd.extend(volume_opts_db)
     cmd.extend(["-e", f"MYSQL_ROOT_PASSWORD={db_password}", "-e", f"MYSQL_DATABASE={db_name}", "mariadb:latest"])
@@ -627,7 +660,7 @@ def setup_docker_db():
         sys.exit(1)
 
 # -------------------------------------------------
-# 8. Dockerize WAF (Using Existing Functionality)
+# 9. Dockerize WAF
 # -------------------------------------------------
 
 def setup_docker_waf():
@@ -676,7 +709,7 @@ def setup_docker_waf():
         sys.exit(1)
 
 # -------------------------------------------------
-# 9. Toggle Web Container Mode
+# 10. Toggle Web Container Mode
 # -------------------------------------------------
 
 def toggle_web_container_mode():
@@ -689,8 +722,9 @@ def toggle_web_container_mode():
     image_name = input("Enter the image name used for this container: ").strip()
     desired_mode = input("Enter desired mode ('secure' or 'development'): ").strip().lower()
     if desired_mode not in ["secure", "development"]:
-        print("[ERROR] Invalid mode specified.")
+        print("[ERROR] Invalid mode specified. Must be 'secure' or 'development'.")
         return
+    # Stop & remove the container
     try:
         subprocess.check_call(["docker", "rm", "-f", container_name])
     except subprocess.CalledProcessError as e:
@@ -709,9 +743,8 @@ def toggle_web_container_mode():
         print(f"[ERROR] Failed to run container '{container_name}' in {desired_mode} mode: {e}")
 
 # -------------------------------------------------
-# 10. Continuous Integrity Check (Using Existing Functions)
+# 11. Continuous Integrity Check
 # -------------------------------------------------
-# (The functions continuous_integrity_check and minimal_integrity_check are defined above.)
 
 def run_integrity_check_menu():
     """Interactive prompt for running integrity checks on containers."""
@@ -776,7 +809,7 @@ def run_integrity_check_menu():
         print("[ERROR] Invalid option.")
 
 # -------------------------------------------------
-# 11. Interactive Menu
+# 12. Interactive Menu
 # -------------------------------------------------
 
 def interactive_menu():
@@ -815,12 +848,12 @@ def interactive_menu():
             print("[ERROR] Invalid option. Please try again.")
 
 # -------------------------------------------------
-# 12. Main Function
+# 13. Main Function
 # -------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(
-        description="CCDC OS-to-Container & Integrity Tool (Web Service Focused)"
+        description="CCDC OS-to-Container & Integrity Tool (Comprehensive, focusing on Web Service Dockerization)."
     )
     parser.add_argument("--menu", action="store_true", help="Launch interactive menu")
     args = parser.parse_args()
