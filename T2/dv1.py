@@ -1207,9 +1207,6 @@ CMD ["httpd", "-D", "FOREGROUND"]
             print(f"[ERROR] Failed to run container '{container_name}': {e}")
     else:
         print("[INFO] Build completed. You can run the image later using 'docker run'.")
-    def get_sudo_prefix():
-    """Return sudo prefix if available, else an empty list."""
-    return ["sudo"] if shutil.which("sudo") else []
 
 def get_sudo_prefix():
     """Return sudo prefix if available, else an empty list."""
