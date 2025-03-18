@@ -52,12 +52,16 @@ install_docker() {
         apt-get)
             sudo apt-get update -y
             sudo apt-get install -y ca-certificates curl gnupg lsb-release
+            # Prepare the GPG keyring directory
             sudo install -m 0755 -d /etc/apt/keyrings
             sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
             sudo chmod a+r /etc/apt/keyrings/docker.asc
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \$(
-              . /etc/os-release && echo \"\${UBUNTU_CODENAME:-\$VERSION_CODENAME}\"
-            ) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+            # Use lsb_release to get the codename (avoids malformed line issues)
+            CODENAME=$(lsb_release -cs)
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $CODENAME stable" \
+                | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
             sudo apt-get update -y
             sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
             ;;
@@ -259,12 +263,11 @@ detect_os_and_recommend_image() {
 setup_docker_database() {
     print_banner "Setting Up Dockerized Database"
     # Map OS to a compatible database container image.
-    # Adjust the mapping as needed for your environment.
     if [[ "$OS_ID" == "centos" ]]; then
         case "$OS_MAJOR" in
-            6) db_image="mysql:5.5" ;;   # Older CentOS may need MySQL 5.5
+            6) db_image="mysql:5.5" ;;   # For very old CentOS
             7) db_image="mysql:5.7" ;;   # CentOS 7: recommended MySQL 5.7
-            *) db_image="mysql:8.0" ;;     # Newer CentOS versions
+            *) db_image="mysql:8.0" ;;   # Newer CentOS versions
         esac
     elif [[ "$OS_ID" == "ubuntu" ]]; then
         if [ "$OS_MAJOR" -lt 20 ]; then
@@ -286,7 +289,6 @@ setup_docker_database() {
     echo "[INFO] Pulling the database image..."
     docker pull "$db_image"
     echo "[INFO] Running the Dockerized Database container..."
-    # Adjust environment variables and port mapping as needed.
     docker run -d --name dockerized_db -e MYSQL_ROOT_PASSWORD=my-secret-pw -p 3306:3306 "$db_image"
     echo "[INFO] Database container 'dockerized_db' is running."
 }
@@ -299,13 +301,13 @@ setup_docker_modsecurity() {
     # Map OS to a compatible ModSecurity container image.
     if [[ "$OS_ID" == "centos" ]]; then
         case "$OS_MAJOR" in
-            6) waf_image="modsecurity/modsecurity:2.8.0" ;;  # Hypothetical older version for CentOS 6
-            7) waf_image="modsecurity/modsecurity:2.9.3" ;;  # Recommended for CentOS 7
+            6) waf_image="modsecurity/modsecurity:2.8.0" ;;  # Example older version
+            7) waf_image="modsecurity/modsecurity:2.9.3" ;;  # CentOS 7
             *) waf_image="modsecurity/modsecurity:latest" ;;
         esac
     elif [[ "$OS_ID" == "ubuntu" ]]; then
         if [ "$OS_MAJOR" -lt 20 ]; then
-            waf_image="modsecurity/modsecurity:2.9.2"  # Older version for older Ubuntu
+            waf_image="modsecurity/modsecurity:2.9.2"  # Example older version
         else
             waf_image="modsecurity/modsecurity:latest"
         fi
@@ -317,7 +319,6 @@ setup_docker_modsecurity() {
     echo "[INFO] Pulling the ModSecurity image..."
     docker pull "$waf_image"
     echo "[INFO] Running the Dockerized ModSecurity WAF container..."
-    # Adjust port mapping and configuration as needed.
     docker run -d --name dockerized_waf -p 80:80 "$waf_image"
     echo "[INFO] ModSecurity WAF container 'dockerized_waf' is running."
 }
