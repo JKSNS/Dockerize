@@ -1,14 +1,18 @@
 #!/bin/bash
 set -e
 
+# -----------------------------------------------------------------------------
 # Function: print_banner
+# -----------------------------------------------------------------------------
 print_banner() {
     echo "======================================"
     echo "$1"
     echo "======================================"
 }
 
+# -----------------------------------------------------------------------------
 # Function: detect_system_info
+# -----------------------------------------------------------------------------
 detect_system_info() {
     print_banner "Detecting System Info"
     echo "[*] Detecting package manager..."
@@ -30,7 +34,9 @@ detect_system_info() {
     fi
 }
 
+# -----------------------------------------------------------------------------
 # Function: install_docker
+# -----------------------------------------------------------------------------
 install_docker() {
     print_banner "Installing Docker"
     case "$pm" in
@@ -68,7 +74,9 @@ install_docker() {
     esac
 }
 
+# -----------------------------------------------------------------------------
 # Function: install_docker_compose
+# -----------------------------------------------------------------------------
 install_docker_compose() {
     print_banner "Installing Docker Compose"
     if command -v docker-compose &>/dev/null; then
@@ -97,7 +105,9 @@ install_docker_compose() {
     fi
 }
 
+# -----------------------------------------------------------------------------
 # Function: fix_docker_group
+# -----------------------------------------------------------------------------
 fix_docker_group() {
     print_banner "Fixing Docker Group Permissions"
     # If docker commands are not accessible, add the current user to the docker group.
@@ -122,7 +132,9 @@ fix_docker_group() {
     fi
 }
 
+# -----------------------------------------------------------------------------
 # Function: check_dependencies
+# -----------------------------------------------------------------------------
 check_dependencies() {
     print_banner "Checking Docker and Docker Compose"
 
@@ -146,8 +158,95 @@ check_dependencies() {
     fi
 }
 
+# -----------------------------------------------------------------------------
+# Function: detect_os_and_recommend_image
+# -----------------------------------------------------------------------------
+detect_os_and_recommend_image() {
+    print_banner "OS Detection & Docker Base Image Recommendation"
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+    else
+        echo "[WARN] Cannot detect OS information from /etc/os-release."
+        recommended_image="ubuntu:latest"
+        echo "[INFO] Recommended Docker base image: $recommended_image"
+        return
+    fi
+
+    os_id=$(echo "$ID" | tr '[:upper:]' '[:lower:]')
+    os_version=$(echo "$VERSION_ID" | tr -d '"')
+    major_version=$(echo "$os_version" | cut -d. -f1)
+
+    case "$os_id" in
+        ubuntu)
+            case "$major_version" in
+                14) recommended_image="ubuntu:14.04" ;;
+                16) recommended_image="ubuntu:16.04" ;;
+                18) recommended_image="ubuntu:18.04" ;;
+                20) recommended_image="ubuntu:20.04" ;;
+                22) recommended_image="ubuntu:22.04" ;;
+                *) recommended_image="ubuntu:latest" ;;
+            esac
+            ;;
+        debian)
+            case "$major_version" in
+                7) recommended_image="debian:7" ;;
+                8) recommended_image="debian:8" ;;
+                9) recommended_image="debian:9" ;;
+                10) recommended_image="debian:10" ;;
+                11) recommended_image="debian:11" ;;
+                12) recommended_image="debian:12" ;;
+                *) recommended_image="debian:latest" ;;
+            esac
+            ;;
+        centos)
+            case "$major_version" in
+                6) recommended_image="centos:6" ;;
+                7) recommended_image="centos:7" ;;
+                8) recommended_image="centos:8" ;;
+                9) recommended_image="centos:stream9" ;;
+                *) recommended_image="ubuntu:latest" ;;
+            esac
+            ;;
+        fedora)
+            case "$major_version" in
+                25) recommended_image="fedora:25" ;;
+                26) recommended_image="fedora:26" ;;
+                27) recommended_image="fedora:27" ;;
+                28) recommended_image="fedora:28" ;;
+                29) recommended_image="fedora:29" ;;
+                30) recommended_image="fedora:30" ;;
+                31) recommended_image="fedora:31" ;;
+                35) recommended_image="fedora:35" ;;
+                *) recommended_image="fedora:latest" ;;
+            esac
+            ;;
+        opensuse* )
+            # Distinguish between Leap and Tumbleweed if possible.
+            if [[ "$PRETTY_NAME" == *"Tumbleweed"* ]]; then
+                recommended_image="opensuse/tumbleweed"
+            elif [[ "$PRETTY_NAME" == *"Leap"* ]]; then
+                case "$major_version" in
+                    15) recommended_image="opensuse/leap:15" ;;
+                    *) recommended_image="opensuse/leap:latest" ;;
+                esac
+            else
+                recommended_image="opensuse:latest"
+            fi
+            ;;
+        *)
+            recommended_image="ubuntu:latest"
+            ;;
+    esac
+
+    echo "[INFO] Detected OS: $PRETTY_NAME"
+    echo "[INFO] Recommended Docker base image: $recommended_image"
+}
+
+# -----------------------------------------------------------------------------
 # Main Execution
+# -----------------------------------------------------------------------------
 detect_system_info
 check_dependencies
+detect_os_and_recommend_image
 
 echo "[INFO] All dependencies installed and configured successfully."
