@@ -48,39 +48,70 @@ detect_system_info() {
 # -----------------------------------------------------------------------------
 install_docker() {
     print_banner "Installing Docker"
+
+    # If /etc/os-release is present, read it to identify $OS_ID, $OS_VERSION, etc.
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS_ID=$(echo "$ID" | tr '[:upper:]' '[:lower:]')
+        OS_VERSION=$(echo "$VERSION_ID" | tr -d '"')
+        OS_MAJOR=$(echo "$OS_VERSION" | cut -d. -f1)
+    fi
+
     case "$pm" in
+        # ---------------------------------------------------------------------
+        # Debian or Ubuntu family
+        # ---------------------------------------------------------------------
         apt-get)
-            # Install prerequisites
+            # Install dependencies
             sudo apt-get update -y
-            sudo apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release
+            sudo apt-get install -y \
+                apt-transport-https \
+                ca-certificates \
+                curl \
+                gnupg \
+                lsb-release \
+                software-properties-common
 
-            # Add Docker GPG key to apt-key (older approach avoids 'signed-by' issues)
-            curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+            # Distinguish between Debian & Ubuntu repos
+            # Docker uses different endpoints for each.
+            if [[ "$OS_ID" == "debian" ]]; then
+                # Debian approach
+                curl -fsSL https://download.docker.com/linux/debian/gpg | sudo apt-key add -
+                CODENAME=$(lsb_release -cs)
+                echo "deb [arch=$(dpkg --print-architecture)] https://download.docker.com/linux/debian $CODENAME stable" \
+                    | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+            else
+                # Default to Ubuntu approach (covers Ubuntu, Mint, etc.)
+                curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+                CODENAME=$(lsb_release -cs)
+                echo "deb [arch=$(dpkg --print-architecture)] https://download.docker.com/linux/ubuntu $CODENAME stable" \
+                    | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+            fi
 
-            # Determine codename using lsb_release
-            CODENAME=$(lsb_release -cs)
-
-            # Create the Docker repo list without 'signed-by=' to avoid malformed errors
-            echo "deb [arch=$(dpkg --print-architecture)] https://download.docker.com/linux/ubuntu $CODENAME stable" \
-                | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-
-            # Update and install Docker
             sudo apt-get update -y
             sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
             ;;
+        # ---------------------------------------------------------------------
+        # Fedora family (dnf)
+        # ---------------------------------------------------------------------
         dnf)
             sudo dnf -y install dnf-plugins-core
             sudo dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo
             sudo dnf -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
             ;;
+        # ---------------------------------------------------------------------
+        # RHEL/CentOS family (yum)
+        # ---------------------------------------------------------------------
         yum)
             sudo yum install -y yum-utils
             sudo yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
             sudo yum install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
             ;;
+        # ---------------------------------------------------------------------
+        # OpenSUSE family (zypper)
+        # ---------------------------------------------------------------------
         zypper)
             sudo zypper refresh
-            # On OpenSUSE, docker and docker-compose may be available from the official repos.
             sudo zypper --non-interactive install docker docker-compose
             ;;
         *)
@@ -269,8 +300,8 @@ setup_docker_database() {
     if [[ "$OS_ID" == "centos" ]]; then
         case "$OS_MAJOR" in
             6) db_image="mysql:5.5" ;;   # For very old CentOS
-            7) db_image="mysql:5.7" ;;   # CentOS 7: recommended MySQL 5.7
-            *) db_image="mysql:8.0" ;;   # Newer CentOS versions
+            7) db_image="mysql:5.7" ;;   # CentOS 7
+            *) db_image="mysql:8.0" ;;
         esac
     elif [[ "$OS_ID" == "ubuntu" ]]; then
         if [ "$OS_MAJOR" -lt 20 ]; then
@@ -305,7 +336,7 @@ setup_docker_modsecurity() {
     if [[ "$OS_ID" == "centos" ]]; then
         case "$OS_MAJOR" in
             6) waf_image="modsecurity/modsecurity:2.8.0" ;;  # Example older version
-            7) waf_image="modsecurity/modsecurity:2.9.3" ;;  # CentOS 7
+            7) waf_image="modsecurity/modsecurity:2.9.3" ;;
             *) waf_image="modsecurity/modsecurity:latest" ;;
         esac
     elif [[ "$OS_ID" == "ubuntu" ]]; then
