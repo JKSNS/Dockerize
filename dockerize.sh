@@ -2,6 +2,14 @@
 set -e
 
 # -----------------------------------------------------------------------------
+# Global variables for OS detection
+# -----------------------------------------------------------------------------
+OS_ID=""
+OS_VERSION=""
+OS_MAJOR=""
+recommended_image=""
+
+# -----------------------------------------------------------------------------
 # Function: print_banner
 # -----------------------------------------------------------------------------
 print_banner() {
@@ -64,7 +72,7 @@ install_docker() {
             ;;
         zypper)
             sudo zypper refresh
-            # On OpenSUSE, docker and docker-compose may be available from the official repositories.
+            # On OpenSUSE, docker and docker-compose may be available from the official repos.
             sudo zypper --non-interactive install docker docker-compose
             ;;
         *)
@@ -168,17 +176,20 @@ detect_os_and_recommend_image() {
     else
         echo "[WARN] Cannot detect OS information from /etc/os-release."
         recommended_image="ubuntu:latest"
+        OS_ID="ubuntu"
+        OS_VERSION="latest"
+        OS_MAJOR="latest"
         echo "[INFO] Recommended Docker base image: $recommended_image"
         return
     fi
 
-    os_id=$(echo "$ID" | tr '[:upper:]' '[:lower:]')
-    os_version=$(echo "$VERSION_ID" | tr -d '"')
-    major_version=$(echo "$os_version" | cut -d. -f1)
+    OS_ID=$(echo "$ID" | tr '[:upper:]' '[:lower:]')
+    OS_VERSION=$(echo "$VERSION_ID" | tr -d '"')
+    OS_MAJOR=$(echo "$OS_VERSION" | cut -d. -f1)
 
-    case "$os_id" in
+    case "$OS_ID" in
         ubuntu)
-            case "$major_version" in
+            case "$OS_MAJOR" in
                 14) recommended_image="ubuntu:14.04" ;;
                 16) recommended_image="ubuntu:16.04" ;;
                 18) recommended_image="ubuntu:18.04" ;;
@@ -188,7 +199,7 @@ detect_os_and_recommend_image() {
             esac
             ;;
         debian)
-            case "$major_version" in
+            case "$OS_MAJOR" in
                 7) recommended_image="debian:7" ;;
                 8) recommended_image="debian:8" ;;
                 9) recommended_image="debian:9" ;;
@@ -199,7 +210,7 @@ detect_os_and_recommend_image() {
             esac
             ;;
         centos)
-            case "$major_version" in
+            case "$OS_MAJOR" in
                 6) recommended_image="centos:6" ;;
                 7) recommended_image="centos:7" ;;
                 8) recommended_image="centos:8" ;;
@@ -208,7 +219,7 @@ detect_os_and_recommend_image() {
             esac
             ;;
         fedora)
-            case "$major_version" in
+            case "$OS_MAJOR" in
                 25) recommended_image="fedora:25" ;;
                 26) recommended_image="fedora:26" ;;
                 27) recommended_image="fedora:27" ;;
@@ -221,11 +232,10 @@ detect_os_and_recommend_image() {
             esac
             ;;
         opensuse* )
-            # Distinguish between Leap and Tumbleweed if possible.
             if [[ "$PRETTY_NAME" == *"Tumbleweed"* ]]; then
                 recommended_image="opensuse/tumbleweed"
             elif [[ "$PRETTY_NAME" == *"Leap"* ]]; then
-                case "$major_version" in
+                case "$OS_MAJOR" in
                     15) recommended_image="opensuse/leap:15" ;;
                     *) recommended_image="opensuse/leap:latest" ;;
                 esac
@@ -243,10 +253,112 @@ detect_os_and_recommend_image() {
 }
 
 # -----------------------------------------------------------------------------
+# Function: setup_docker_database
+# -----------------------------------------------------------------------------
+setup_docker_database() {
+    print_banner "Setting Up Dockerized Database"
+    # Map OS to a compatible database container image (MySQL in this example).
+    # For CentOS 7 or Ubuntu versions below 20, recommend MySQL 5.7 for compatibility.
+    if [[ "$OS_ID" == "centos" && "$OS_MAJOR" -eq 7 ]]; then
+        db_image="mysql:5.7"
+    elif [[ "$OS_ID" == "ubuntu" && "$OS_MAJOR" -lt 20 ]]; then
+        db_image="mysql:5.7"
+    else
+        db_image="mysql:8.0"
+    fi
+    echo "[INFO] Recommended Dockerized Database image: $db_image"
+    echo "[INFO] Pulling the database image..."
+    docker pull "$db_image"
+    echo "[INFO] Running the Dockerized Database container..."
+    # Note: Adjust environment variables and port mapping as needed.
+    docker run -d --name dockerized_db -e MYSQL_ROOT_PASSWORD=my-secret-pw -p 3306:3306 "$db_image"
+    echo "[INFO] Database container 'dockerized_db' is running."
+}
+
+# -----------------------------------------------------------------------------
+# Function: setup_docker_modsecurity
+# -----------------------------------------------------------------------------
+setup_docker_modsecurity() {
+    print_banner "Setting Up Dockerized ModSecurity WAF"
+    # Map OS to a compatible ModSecurity container image.
+    # For example, if running on CentOS 7, use an older version for compatibility.
+    if [[ "$OS_ID" == "centos" && "$OS_MAJOR" -eq 7 ]]; then
+        waf_image="modsecurity/modsecurity:2.9.3"  # older, compatible version
+    else
+        waf_image="modsecurity/modsecurity:latest"
+    fi
+    echo "[INFO] Recommended Dockerized ModSecurity WAF image: $waf_image"
+    echo "[INFO] Pulling the ModSecurity image..."
+    docker pull "$waf_image"
+    echo "[INFO] Running the Dockerized ModSecurity WAF container..."
+    # Note: Adjust port mapping and configuration as needed.
+    docker run -d --name dockerized_waf -p 80:80 "$waf_image"
+    echo "[INFO] ModSecurity WAF container 'dockerized_waf' is running."
+}
+
+# -----------------------------------------------------------------------------
+# Function: display_menu
+# -----------------------------------------------------------------------------
+display_menu() {
+    echo "======================================"
+    echo "Dockerization Script Menu"
+    echo "======================================"
+    echo "1) Install Docker and Docker Compose"
+    echo "2) OS Detection and Recommended Base Image"
+    echo "3) Setup Dockerized Database"
+    echo "4) Setup Dockerized ModSecurity WAF"
+    echo "5) Full Automatic Installation (all steps)"
+    echo "6) Exit"
+    echo -n "Enter your choice (1-6): "
+    read -r choice
+    case "$choice" in
+        1)
+            detect_system_info
+            check_dependencies
+            ;;
+        2)
+            detect_os_and_recommend_image
+            ;;
+        3)
+            # Ensure OS variables are set:
+            detect_os_and_recommend_image
+            setup_docker_database
+            ;;
+        4)
+            # Ensure OS variables are set:
+            detect_os_and_recommend_image
+            setup_docker_modsecurity
+            ;;
+        5)
+            detect_system_info
+            check_dependencies
+            detect_os_and_recommend_image
+            setup_docker_database
+            setup_docker_modsecurity
+            ;;
+        6)
+            echo "Exiting."
+            exit 0
+            ;;
+        *)
+            echo "Invalid option. Exiting."
+            exit 1
+            ;;
+    esac
+}
+
+# -----------------------------------------------------------------------------
 # Main Execution
 # -----------------------------------------------------------------------------
-detect_system_info
-check_dependencies
-detect_os_and_recommend_image
+if [[ "$1" == "--menu" ]]; then
+    display_menu
+else
+    # Full automatic installation mode if no flag is provided.
+    detect_system_info
+    check_dependencies
+    detect_os_and_recommend_image
+    setup_docker_database
+    setup_docker_modsecurity
+fi
 
-echo "[INFO] All dependencies installed and configured successfully."
+echo "[INFO] All tasks completed successfully."
