@@ -50,18 +50,21 @@ install_docker() {
     print_banner "Installing Docker"
     case "$pm" in
         apt-get)
+            # Install prerequisites
             sudo apt-get update -y
-            sudo apt-get install -y ca-certificates curl gnupg lsb-release
-            # Prepare the GPG keyring directory
-            sudo install -m 0755 -d /etc/apt/keyrings
-            sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-            sudo chmod a+r /etc/apt/keyrings/docker.asc
+            sudo apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release
 
-            # Use lsb_release to get the codename (avoids malformed line issues)
+            # Add Docker GPG key to apt-key (older approach avoids 'signed-by' issues)
+            curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+
+            # Determine codename using lsb_release
             CODENAME=$(lsb_release -cs)
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $CODENAME stable" \
+
+            # Create the Docker repo list without 'signed-by=' to avoid malformed errors
+            echo "deb [arch=$(dpkg --print-architecture)] https://download.docker.com/linux/ubuntu $CODENAME stable" \
                 | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 
+            # Update and install Docker
             sudo apt-get update -y
             sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
             ;;
