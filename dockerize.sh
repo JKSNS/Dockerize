@@ -63,6 +63,8 @@ attempt_install_docker_linux() {
             ;;
         zypper)
             sudo zypper refresh
+            # Add the official Docker repository
+            sudo zypper addrepo https://download.docker.com/linux/opensuse/opensuse.repo
             sudo zypper --non-interactive install docker
             sudo systemctl enable docker
             sudo systemctl start docker
@@ -93,22 +95,22 @@ attempt_install_docker_compose_linux() {
 
     echo "[INFO] Attempting to install Docker Compose using '${pm}' on Linux..."
     case "${pm}" in
-        apt-get)
-            sudo "${pm}" update -y
-            sudo "${pm}" install -y docker-compose
-            ;;
-        yum|dnf)
-            sudo "${pm}" -y install docker-compose
-            ;;
-        zypper)
-            sudo zypper refresh
-            sudo zypper --non-interactive install docker-compose
+        apt-get|yum|dnf|zypper)
+            # Remove package manager-based installation
             ;;
         *)
             echo "[ERROR] Package manager '${pm}' is not fully supported for Docker Compose auto-install."
             return 1
             ;;
     esac
+
+    # Install Docker Compose directly from GitHub
+    DOCKER_COMPOSE_VERSION="v2.21.0" # specify version
+    DOCKER_COMPOSE_URL="https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-$(uname -s)-$(uname -m)"
+
+    echo "[INFO] Downloading Docker Compose from ${DOCKER_COMPOSE_URL}"
+    sudo curl -L "${DOCKER_COMPOSE_URL}" -o /usr/local/bin/docker-compose
+    sudo chmod +x /usr/local/bin/docker-compose
 
     echo "[INFO] Docker Compose installation attempt completed. Checking if it is now available..."
     if command -v docker-compose &>/dev/null; then
@@ -145,19 +147,21 @@ fix_docker_group() {
         echo "[WARN] Could not add user to docker group."
     fi
 
-    echo "[INFO] Enabling and starting Docker service..."
-    if command -v systemctl &>/dev/null; then
-        sudo systemctl enable docker || echo "[WARN] Could not enable docker service."
-        sudo systemctl start docker  || echo "[WARN] Could not start docker service."
-    fi
+    echo "[INFO] Please log out and log back in to activate the new group membership."
+    return 1 # Indicate that the script cannot proceed automatically
 
-    echo "[INFO] Re-executing script under 'sg docker' to activate group membership."
-    export CCDC_DOCKER_GROUP_FIX=1
-    local script_path
-    script_path="$(readlink -f "$0")"
-    local cmd
-    cmd=("sg" "docker" "-c" "export CCDC_DOCKER_GROUP_FIX=1; exec \"${script_path}\" $*")
-    exec "${cmd[@]}"
+    #echo "[INFO] Enabling and starting Docker service..."
+    #if command -v systemctl &>/dev/null; then
+    #    sudo systemctl enable docker || echo "[WARN] Could not enable docker service."
+    #    sudo systemctl start docker  || echo "[WARN] Could not start docker service."
+    #fi
+    #echo "[INFO] Re-executing script under 'sg docker' to activate group membership."
+    #export CCDC_DOCKER_GROUP_FIX=1
+    #local script_path
+    #script_path="$(readlink -f "$0")"
+    #local cmd
+    #cmd=("sg" "docker" "-c" "export CCDC_DOCKER_GROUP_FIX=1; exec \"${script_path}\" $*")
+    #exec "${cmd[@]}"
 }
 
 ###############################################################################
