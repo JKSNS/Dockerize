@@ -69,11 +69,12 @@ fix_docker_group() {
 
     # Attempt to apply group changes without requiring a full logout/login
     if command -v newgrp >/dev/null; then
-        newgrp docker
+        sudo newgrp docker
         echo "[INFO] 'newgrp docker' command executed to attempt to apply group changes."
     else
         echo "[WARN] 'newgrp' command not found.  Log out and back in to ensure group membership is updated."
     fi
+
     return 0 # Indicate success (though relogin is still needed)
 }
 
@@ -387,7 +388,7 @@ setup_docker_database() {
     sudo docker pull "$db_image"
 
     echo "[INFO] Running the Dockerized Database container..."
-    docker run -d --name dockerized_db -e MYSQL_ROOT_PASSWORD=my-secret-pw -p 3306:3306 "$db_image"
+    sudo docker run -d --name dockerized_db -e MYSQL_ROOT_PASSWORD=my-secret-pw -p 3306:3306 "$db_image"
     echo "[INFO] Database container 'dockerized_db' is running."
 }
 
@@ -420,7 +421,7 @@ setup_docker_modsecurity() {
     sudo docker pull "$waf_image"
 
     echo "[INFO] Running the Dockerized ModSecurity WAF container..."
-    docker run -d --name dockerized_waf -p 80:80 "$waf_image"
+    sudo docker run -d --name dockerized_waf -p 80:80 "$waf_image"
     echo "[INFO] ModSecurity WAF container 'dockerized_waf' is running."
 }
 
