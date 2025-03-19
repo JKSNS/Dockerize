@@ -53,10 +53,12 @@ attempt_install_docker_linux() {
     case "${pm}" in
         apt-get)
             sudo apt-get update -y
-            # Use the official Docker repository
+            # Use the official Docker repository - Corrected way to add repo
             sudo apt-get install -y apt-transport-https ca-certificates curl gnupg
             curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
             echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+            # Fix malformed entry issue: add a space before stable [3][4][5][6]
+            #echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs)  stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
             sudo apt-get update -y
             sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
             ;;
@@ -90,6 +92,8 @@ attempt_install_docker_linux() {
 
     echo "[INFO] Docker installation attempt completed. Checking if Docker is now available..."
     if command -v docker &>/dev/null; then
+         sudo systemctl enable docker || echo "[WARN] Could not enable docker service."
+         sudo systemctl start docker || echo "[WARN] Could not start docker service."
         return 0
     else
         return 1
@@ -138,9 +142,10 @@ fix_docker_group() {
     echo "[INFO] Adding user '${current_user}' to docker group."
     if ! sudo usermod -aG docker "${current_user}"; then
         echo "[WARN] Could not add user to docker group."
+        echo "[HINT] You may need to install the 'usermod' command. (e.g., 'apt install shadow-utils')"
     fi
 
-    echo "[INFO] New permissions will be applied after a re-login."
+    echo "[INFO] New permissions will be applied after a re-login or running 'newgrp docker'."
 
     if can_run_docker; then
         echo "[INFO] Docker is accessible now after group fix."
