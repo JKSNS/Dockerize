@@ -66,6 +66,8 @@ fix_docker_group() {
     fi
 
     echo "[INFO] New permissions will be applied after a re-login or running 'newgrp docker'."
+    # Attempt to apply group changes without requiring a full logout/login
+    newgrp docker
     return 0 # Indicate success (though relogin is still needed)
 }
 
@@ -169,11 +171,32 @@ ensure_docker_is_runnable() {
         echo "[INFO] Docker is running and accessible."
         return 0
     else
+       echo "[WARN] Docker is installed, but not accessible.  Attempting to fix permissions..."
+
+        # Attempt to fix socket permissions
+        if [[ -S /var/run/docker.sock ]]; then
+            sudo chown root:docker /var/run/docker.sock
+            sudo chmod 660 /var/run/docker.sock
+            echo "[INFO] Attempted to fix /var/run/docker.sock permissions."
+        else
+            echo "[WARN] /var/run/docker.sock not found.  Ensure Docker daemon is running."
+        fi
+
         echo "[WARN] Docker is installed, but not accessible. Fixing docker group..."
         if fix_docker_group; then
             echo "[INFO] Docker group fixed. Please log out/in or run 'newgrp docker' and try again."
+             # Give Docker a chance to start and the user a chance to log out/in
+             sleep 5
         else
             echo "[ERROR] Failed to fix Docker group. Docker may not be runnable."
+            return 1
+        fi
+
+       if can_run_docker; then
+            echo "[INFO] Docker is now accessible."
+            return 0
+        else
+            echo "[ERROR] Docker is still not accessible.  Log out/in or run 'newgrp docker'."
             return 1
         fi
     fi
