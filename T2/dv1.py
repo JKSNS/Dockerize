@@ -1242,7 +1242,7 @@ def option_purge_docker():
             try:
                 print(f"[INFO] Removing Docker using {pm}...")
                 if pm in ("apt", "apt-get"):
-                    subprocess.check_call(sudo_prefix + [pm, "remove", "-y", "docker.io"])
+                    subprocess.check_call(sudo_prefix + [pm, "remove", "-y", "docker.io", "docker-ce", "docker-ce-cli", "containerd.io"])
                     subprocess.check_call(sudo_prefix + [pm, "autoremove", "-y"])
                 elif pm in ("yum", "dnf"):
                     subprocess.check_call(sudo_prefix + [pm, "remove", "-y", "docker"])
