@@ -52,20 +52,33 @@ attempt_install_docker_linux() {
     echo "[INFO] Attempting to install Docker using '${pm}' on Linux..."
     case "${pm}" in
         apt-get)
-            sudo "${pm}" update -y
-            # On Debian/Ubuntu, we install 'docker.io' to avoid advanced repo logic
-            sudo "${pm}" install -y docker.io
+            sudo apt-get update -y
+            # Use the official Docker repository
+            sudo apt-get install -y apt-transport-https ca-certificates curl gnupg
+            curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+            sudo apt-get update -y
+            sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
             ;;
-        yum|dnf)
-            sudo "${pm}" -y install docker
+        yum)
+            sudo yum install -y yum-utils
+            sudo yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+            sudo yum install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+            sudo systemctl enable docker
+            sudo systemctl start docker
+            ;;
+        dnf)
+            sudo dnf install -y dnf-plugins-core
+            sudo dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo
+            sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
             sudo systemctl enable docker
             sudo systemctl start docker
             ;;
         zypper)
             sudo zypper refresh
             # Add the official Docker repository
-            sudo zypper addrepo https://download.docker.com/linux/opensuse/opensuse.repo
-            sudo zypper --non-interactive install docker
+            sudo zypper addrepo https://download.docker.com/linux/opensuse/docker-ce.repo
+            sudo zypper --non-interactive install docker-ce docker-ce-cli containerd.io docker-compose-plugin
             sudo systemctl enable docker
             sudo systemctl start docker
             ;;
@@ -87,35 +100,15 @@ attempt_install_docker_linux() {
 # 3) ATTEMPT INSTALL DOCKER COMPOSE (Mirrors your Python snippet, but in Bash)
 ###############################################################################
 attempt_install_docker_compose_linux() {
-    local pm
-    pm="$(detect_linux_package_manager)" || {
-        echo "[ERROR] No recognized package manager found. Cannot auto-install Docker Compose."
-        return 1
-    }
-
-    echo "[INFO] Attempting to install Docker Compose using '${pm}' on Linux..."
-    case "${pm}" in
-        apt-get|yum|dnf|zypper)
-            # Remove package manager-based installation
-            ;;
-        *)
-            echo "[ERROR] Package manager '${pm}' is not fully supported for Docker Compose auto-install."
-            return 1
-            ;;
-    esac
-
-    # Install Docker Compose directly from GitHub
-    DOCKER_COMPOSE_VERSION="v2.21.0" # specify version
-    DOCKER_COMPOSE_URL="https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-$(uname -s)-$(uname -m)"
-
-    echo "[INFO] Downloading Docker Compose from ${DOCKER_COMPOSE_URL}"
-    sudo curl -L "${DOCKER_COMPOSE_URL}" -o /usr/local/bin/docker-compose
-    sudo chmod +x /usr/local/bin/docker-compose
-
-    echo "[INFO] Docker Compose installation attempt completed. Checking if it is now available..."
+    # Docker Compose is now a plugin, so this function is mostly for ensuring it's available
     if command -v docker-compose &>/dev/null; then
+        echo "[INFO] Docker Compose is already installed."
         return 0
+    elif command -v docker compose &>/dev/null; then
+         echo "[INFO] Docker Compose is already installed (as docker compose)."
+         return 0
     else
+        echo "[WARN] Docker Compose not found, please install docker-compose-plugin"
         return 1
     fi
 }
@@ -147,40 +140,23 @@ fix_docker_group() {
         echo "[WARN] Could not add user to docker group."
     fi
 
-    echo "[INFO] Please log out and log back in to activate the new group membership."
-    return 1 # Indicate that the script cannot proceed automatically
+    echo "[INFO] New permissions will be applied after a re-login."
 
-    #echo "[INFO] Enabling and starting Docker service..."
-    #if command -v systemctl &>/dev/null; then
-    #    sudo systemctl enable docker || echo "[WARN] Could not enable docker service."
-    #    sudo systemctl start docker  || echo "[WARN] Could not start docker service."
-    #fi
-    #echo "[INFO] Re-executing script under 'sg docker' to activate group membership."
-    #export CCDC_DOCKER_GROUP_FIX=1
-    #local script_path
-    #script_path="$(readlink -f "$0")"
-    #local cmd
-    #cmd=("sg" "docker" "-c" "export CCDC_DOCKER_GROUP_FIX=1; exec \"${script_path}\" $*")
-    #exec "${cmd[@]}"
+    if can_run_docker; then
+        echo "[INFO] Docker is accessible now after group fix."
+        return 0
+    else
+        echo "[ERROR] Docker still not accessible even after group fix. Please log out and back in, or run 'newgrp docker'. Exiting."
+        exit 1
+    fi
 }
 
 ###############################################################################
 # 6) ensure_docker_installed
 #    Checks if Docker is installed & user can run it. If missing, tries auto-install.
-#    If user isn't in docker group, fix that, then re-exec with sg.
+#    If user isn't in docker group, fix that.
 ###############################################################################
 ensure_docker_installed() {
-    if [[ -n "${CCDC_DOCKER_GROUP_FIX}" ]]; then
-        # Already tried group fix once. Let's see if we can run docker now.
-        if can_run_docker; then
-            echo "[INFO] Docker is accessible now after group fix."
-            return 0
-        else
-            echo "[ERROR] Docker still not accessible even after group fix. Exiting."
-            exit 1
-        fi
-    fi
-
     if can_run_docker; then
         echo "[INFO] Docker is already installed and accessible."
         return 0
@@ -192,7 +168,8 @@ ensure_docker_installed() {
             echo "[INFO] Docker is installed and accessible on Linux now."
             return 0
         else
-            fix_docker_group "$@"
+            echo "[WARN] Docker was installed, but is not accessible. Fixing docker group..."
+            fix_docker_group
         fi
     else
         echo "[ERROR] Could not auto-install Docker on Linux. Please install it manually."
@@ -202,23 +179,18 @@ ensure_docker_installed() {
 
 ###############################################################################
 # 7) check_docker_compose
-#    Checks if Docker Compose is installed. If not, tries auto-install.
+#    Checks if Docker Compose is installed. If not, suggests manual install.
 ###############################################################################
 check_docker_compose() {
     if command -v docker-compose &>/dev/null; then
         echo "[INFO] Docker Compose is already installed."
         return 0
-    fi
-
-    echo "[WARN] Docker Compose not found. Attempting auto-install (Linux only)."
-    if attempt_install_docker_compose_linux; then
-        if command -v docker-compose &>/dev/null; then
-            echo "[INFO] Docker Compose installed successfully."
-        else
-            echo "[ERROR] Docker Compose still not available after attempted install."
-        fi
+    elif command -v docker compose &>/dev/null; then
+         echo "[INFO] Docker Compose is already installed (as docker compose)."
+         return 0
     else
-        echo "[ERROR] Could not auto-install Docker Compose on Linux. Please install manually."
+        echo "[WARN] Docker Compose not found.  Please install docker-compose-plugin or docker compose manually."
+        return 1
     fi
 }
 
@@ -281,7 +253,7 @@ detect_os_and_recommend_image() {
                 7) recommended_image="centos:7" ;;
                 8) recommended_image="centos:8" ;;
                 9) recommended_image="centos:stream9" ;;
-                *) recommended_image="ubuntu:latest" ;;
+                *) recommended_image="centos:latest" ;;
             esac
             ;;
         fedora)
