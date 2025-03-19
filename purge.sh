@@ -2,6 +2,23 @@
 set -e
 
 # Detect package manager
+detect_linux_package_manager() {
+    if command -v apt-get &>/dev/null; then
+        echo "apt-get"
+    elif command -v apt &>/dev/null; then
+        # Some systems use 'apt' instead of apt-get
+        echo "apt-get"
+    elif command -v yum &>/dev/null; then
+        echo "yum"
+    elif command -v dnf &>/dev/null; then
+        echo "dnf"
+    elif command -v zypper &>/dev/null; then
+        echo "zypper"
+    else
+        return 1
+    fi
+}
+
 PM=$(detect_linux_package_manager)
 
 # Uninstall Docker packages
@@ -39,7 +56,10 @@ remove_docker_data() {
   sudo rm -f /etc/apparmor.d/docker
   sudo rm -rf /var/run/docker.sock
   sudo rm -rf /usr/local/bin/com.docker.cli
-  sudo rm -rf /usr/bin/docker-compose # Remove Compose binary if it exists
+    #More removal paths
+    sudo rm -rf /usr/bin/docker-compose
+    sudo rm -rf /usr/local/bin/docker-compose
+
   sudo find / -name '*docker*' -print0 | sudo xargs -0 rm -rf
   return 0
 }
@@ -57,31 +77,30 @@ remove_docker_group() {
 
 # Remove Docker service files
 remove_docker_services() {
-  sudo systemctl stop docker || true
-  sudo systemctl disable docker || true
+    sudo systemctl stop docker.socket || true
+    sudo systemctl stop docker || true
+
+    sudo systemctl disable docker.socket || true
+    sudo systemctl disable docker || true
+
   sudo rm -rf /etc/systemd/system/docker.service.d
   sudo rm -rf /etc/systemd/system/docker.socket
   sudo rm -rf /etc/systemd/system/multi-user.target.wants/docker.service
   sudo rm -rf /etc/systemd/system/multi-user.target.wants/docker.socket
   sudo rm -rf /lib/systemd/system/docker.service
   sudo rm -rf /lib/systemd/system/docker.socket
-  sudo systemctl daemon-reload || true
+
+    sudo systemctl daemon-reload || true
+    sudo systemctl reset-failed || true
+
   return 0
 }
 
-# Main execution
 print_banner "Removing Docker"
 
-# Attempt to uninstall Docker packages
 uninstall_docker_packages
-
-# Remove Docker data, configs, and related files
 remove_docker_data
-
-# Remove Docker group
 remove_docker_group
-
-# Remove Docker service files
 remove_docker_services
 
 echo "[INFO] Docker and related components have been purged (as best as possible)."
