@@ -40,7 +40,37 @@ detect_linux_package_manager() {
 }
 
 ###############################################################################
-# 2) ATTEMPT INSTALL DOCKER (Mirrors your Python snippet, but in Bash)
+# 2) CHECK DOCKER GROUP AND FIX IF NEEDED (BEFORE INSTALLATION)
+###############################################################################
+fix_docker_group() {
+    local current_user
+    current_user="$(whoami 2>/dev/null || echo "$USER")"
+
+    # Check if docker group exists
+    if ! getent group docker >/dev/null; then
+        echo "[INFO] Docker group does not exist. Creating docker group."
+        sudo groupadd docker
+    fi
+
+    # Check if user is in docker group
+    if id -nG "$current_user" | grep -qw "docker"; then
+        echo "[INFO] User '$current_user' is already a member of the 'docker' group."
+        return 0
+    else
+        echo "[INFO] Adding user '$current_user' to the 'docker' group."
+        if ! sudo usermod -aG docker "$current_user"; then
+            echo "[WARN] Could not add user to docker group."
+            echo "[HINT] You may need to install the 'usermod' command. (e.g., 'apt install shadow-utils')"
+            return 1 # Indicate failure to add user to group
+        fi
+    fi
+
+    echo "[INFO] New permissions will be applied after a re-login or running 'newgrp docker'."
+    return 0 # Indicate success (though relogin is still needed)
+}
+
+###############################################################################
+# 3) ATTEMPT INSTALL DOCKER (Mirrors your Python snippet, but in Bash)
 ###############################################################################
 attempt_install_docker_linux() {
     local pm
@@ -54,11 +84,12 @@ attempt_install_docker_linux() {
         apt-get)
             sudo apt-get update -y
             # Use the official Docker repository - Corrected way to add repo
-            sudo apt-get install -y apt-transport-https ca-certificates curl gnupg
+            sudo apt-get install -y apt-transport-https ca-certificates curl gnupg > /dev/null 2>&1 # Suppress key-related warnings
+            # Add Docker GPG key (more robust method)
             curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-            # Fix malformed entry issue: add a space before stable [3][4][5][6]
-            #echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs)  stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+            # Add the Docker repository to APT sources
+            DOCKER_APT_REPO="deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+            echo "$DOCKER_APT_REPO" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
             sudo apt-get update -y
             sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
             ;;
@@ -92,8 +123,8 @@ attempt_install_docker_linux() {
 
     echo "[INFO] Docker installation attempt completed. Checking if Docker is now available..."
     if command -v docker &>/dev/null; then
-         sudo systemctl enable docker || echo "[WARN] Could not enable docker service."
-         sudo systemctl start docker || echo "[WARN] Could not start docker service."
+        sudo systemctl enable docker || echo "[WARN] Could not enable docker service."
+        sudo systemctl start docker || echo "[WARN] Could not start docker service."
         return 0
     else
         return 1
@@ -101,7 +132,7 @@ attempt_install_docker_linux() {
 }
 
 ###############################################################################
-# 3) ATTEMPT INSTALL DOCKER COMPOSE (Mirrors your Python snippet, but in Bash)
+# 4) ATTEMPT INSTALL DOCKER COMPOSE (Mirrors your Python snippet, but in Bash)
 ###############################################################################
 attempt_install_docker_compose_linux() {
     # Docker Compose is now a plugin, so this function is mostly for ensuring it's available
@@ -118,7 +149,7 @@ attempt_install_docker_compose_linux() {
 }
 
 ###############################################################################
-# 4) can_run_docker
+# 5) can_run_docker
 #    Return 0 if 'docker ps' runs without error; else non-zero.
 ###############################################################################
 can_run_docker() {
@@ -131,37 +162,32 @@ can_run_docker() {
 }
 
 ###############################################################################
-# 5) fix_docker_group
-#    Add current user to 'docker' group, enable/start Docker, re-exec script
-#    under 'sg docker'.
+# 6) ENSURE DOCKER IS RUNNABLE
 ###############################################################################
-fix_docker_group() {
-    local current_user
-    current_user="$(whoami 2>/dev/null || echo "$USER")"
-
-    echo "[INFO] Adding user '${current_user}' to docker group."
-    if ! sudo usermod -aG docker "${current_user}"; then
-        echo "[WARN] Could not add user to docker group."
-        echo "[HINT] You may need to install the 'usermod' command. (e.g., 'apt install shadow-utils')"
-    fi
-
-    echo "[INFO] New permissions will be applied after a re-login or running 'newgrp docker'."
-
+ensure_docker_is_runnable() {
     if can_run_docker; then
-        echo "[INFO] Docker is accessible now after group fix."
+        echo "[INFO] Docker is running and accessible."
         return 0
     else
-        echo "[ERROR] Docker still not accessible even after group fix. Please log out and back in, or run 'newgrp docker'. Exiting."
-        exit 1
+        echo "[WARN] Docker is installed, but not accessible. Fixing docker group..."
+        if fix_docker_group; then
+            echo "[INFO] Docker group fixed. Please log out/in or run 'newgrp docker' and try again."
+        else
+            echo "[ERROR] Failed to fix Docker group. Docker may not be runnable."
+            return 1
+        fi
     fi
 }
 
 ###############################################################################
-# 6) ensure_docker_installed
+# 7) ensure_docker_installed
 #    Checks if Docker is installed & user can run it. If missing, tries auto-install.
 #    If user isn't in docker group, fix that.
 ###############################################################################
 ensure_docker_installed() {
+    # First, try fixing the docker group *before* attempting installation.
+    fix_docker_group
+
     if can_run_docker; then
         echo "[INFO] Docker is already installed and accessible."
         return 0
@@ -169,12 +195,14 @@ ensure_docker_installed() {
 
     echo "[INFO] Docker not found or not accessible. Attempting installation..."
     if attempt_install_docker_linux; then
-        if can_run_docker; then
+         # Give Docker a chance to start and the user a chance to log out/in
+         sleep 5
+        if ensure_docker_is_runnable; then
             echo "[INFO] Docker is installed and accessible on Linux now."
             return 0
         else
-            echo "[WARN] Docker was installed, but is not accessible. Fixing docker group..."
-            fix_docker_group
+            echo "[WARN] Docker was installed, but is not accessible."
+            return 1
         fi
     else
         echo "[ERROR] Could not auto-install Docker on Linux. Please install it manually."
@@ -183,7 +211,7 @@ ensure_docker_installed() {
 }
 
 ###############################################################################
-# 7) check_docker_compose
+# 8) check_docker_compose
 #    Checks if Docker Compose is installed. If not, suggests manual install.
 ###############################################################################
 check_docker_compose() {
@@ -200,7 +228,7 @@ check_docker_compose() {
 }
 
 ###############################################################################
-# 8) check_dependencies
+# 9) check_dependencies
 #    Calls ensure_docker_installed + check_docker_compose.
 ###############################################################################
 check_dependencies() {
@@ -210,7 +238,7 @@ check_dependencies() {
 }
 
 ###############################################################################
-# 9) detect_os_and_recommend_image
+# 10) detect_os_and_recommend_image
 #    Reads /etc/os-release to map OS to a recommended Docker base image.
 ###############################################################################
 detect_os_and_recommend_image() {
@@ -296,7 +324,7 @@ detect_os_and_recommend_image() {
 }
 
 ###############################################################################
-# 10) setup_docker_database
+# 11) setup_docker_database
 #     Example DB container logic, mapping OS to MySQL versions
 ###############################################################################
 setup_docker_database() {
@@ -334,7 +362,7 @@ setup_docker_database() {
 }
 
 ###############################################################################
-# 11) setup_docker_modsecurity
+# 12) setup_docker_modsecurity
 #     Example WAF container logic, mapping OS to ModSecurity versions
 ###############################################################################
 setup_docker_modsecurity() {
@@ -366,7 +394,7 @@ setup_docker_modsecurity() {
 }
 
 ###############################################################################
-# 12) display_menu
+# 13) display_menu
 #     Menu-based approach to choose steps or do everything
 ###############################################################################
 display_menu() {
