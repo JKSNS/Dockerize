@@ -40,7 +40,9 @@ fi
 
 PM=$(detect_linux_package_manager)
 
-# Uninstall Docker packages
+###############################################################################
+# FUNCTION: uninstall_docker_packages
+###############################################################################
 uninstall_docker_packages() {
   echo "[INFO] Uninstalling Docker packages..."
   if [ -n "$PM" ]; then
@@ -71,11 +73,13 @@ uninstall_docker_packages() {
   return 0
 }
 
-# Remove data directories, configs, and related files
+###############################################################################
+# FUNCTION: remove_docker_data
+###############################################################################
 remove_docker_data() {
   echo "[INFO] Removing Docker data and configuration files..."
   
-  # Common Docker directories and files
+  # Remove only known Docker directories and files
   rm -rf /var/lib/docker || true
   rm -rf /etc/docker || true
   rm -f /etc/apparmor.d/docker || true
@@ -84,26 +88,17 @@ remove_docker_data() {
   rm -f /usr/bin/docker-compose || true
   rm -f /usr/local/bin/docker-compose || true
   
-  # Remove Docker Desktop related files (if present)
+  # Remove Docker Desktop related files (if present on Linux)
   rm -rf ~/.docker || true
-  rm -rf ~/Library/Containers/com.docker.docker || true
-  rm -rf ~/Library/Application\ Support/Docker\ Desktop || true
-  rm -rf ~/Library/Group\ Containers/group.com.docker || true
   
-  # Safely find and remove docker-related files (limiting scope to avoid dangerous operations)
-  echo "[INFO] Looking for remaining Docker files in specific directories..."
-  for dir in /etc /var/lib /var/log /usr/bin /usr/local/bin /opt; do
-    find $dir -name "*docker*" -type f -o -type d 2>/dev/null | while read file; do
-      echo "Removing: $file"
-      rm -rf "$file" 2>/dev/null || true
-    done
-  done
-  
+  # Add additional explicit paths if necessary, but avoid generic recursive searches
   echo "[INFO] Docker data and configuration files removed."
   return 0
 }
 
-# Remove Docker group
+###############################################################################
+# FUNCTION: remove_docker_group
+###############################################################################
 remove_docker_group() {
   echo "[INFO] Removing Docker group..."
   if getent group docker >/dev/null; then
@@ -115,7 +110,9 @@ remove_docker_group() {
   return 0
 }
 
-# Remove Docker service files
+###############################################################################
+# FUNCTION: remove_docker_services
+###############################################################################
 remove_docker_services() {
   echo "[INFO] Removing Docker service files..."
   systemctl stop docker.socket 2>/dev/null || true
@@ -123,7 +120,7 @@ remove_docker_services() {
   systemctl disable docker.socket 2>/dev/null || true
   systemctl disable docker 2>/dev/null || true
   
-  # Remove service files
+  # Remove specific service files
   rm -rf /etc/systemd/system/docker.service.d 2>/dev/null || true
   rm -f /etc/systemd/system/docker.socket 2>/dev/null || true
   rm -f /etc/systemd/system/multi-user.target.wants/docker.service 2>/dev/null || true
@@ -131,7 +128,7 @@ remove_docker_services() {
   rm -f /lib/systemd/system/docker.service 2>/dev/null || true
   rm -f /lib/systemd/system/docker.socket 2>/dev/null || true
   
-  # Reload systemd
+  # Reload systemd to apply changes
   systemctl daemon-reload 2>/dev/null || true
   systemctl reset-failed 2>/dev/null || true
   
@@ -139,7 +136,9 @@ remove_docker_services() {
   return 0
 }
 
-# Clean package manager cache
+###############################################################################
+# FUNCTION: clean_package_cache
+###############################################################################
 clean_package_cache() {
   echo "[INFO] Cleaning package manager cache..."
   if [ -n "$PM" ]; then
@@ -162,7 +161,9 @@ clean_package_cache() {
   return 0
 }
 
-# Main execution
+###############################################################################
+# MAIN EXECUTION
+###############################################################################
 print_banner "Starting Docker Removal Process"
 
 # Attempt to uninstall Docker packages
