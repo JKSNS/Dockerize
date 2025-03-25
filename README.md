@@ -1,21 +1,4 @@
-# Dockerize
-
-Just testing...
-
-### Running the Script
-
-- To simply pull the base image based on your host OS, run the script without arguments.
-  ```bash
-  python3 dockerizev2.py --menu
-  ```
-
-<br>
-<br>
-<br>
-
-
-Resources to pull from: 
-
+Additional resources: 
 https://www.cio.gov/assets/files/Containerization%20Readiness%20Guide_Final%20_v3.pdf#:~:text=many%20publicly%20available%20and%20pre,images%20that%20can%20quickly%20run
 
 https://github.com/ucrcyber/ccdc_practice_env
