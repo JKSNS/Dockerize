@@ -104,7 +104,7 @@ Follow the on-screen prompts to select options such as:
 
 ---
 
-## 6. Contributing & License
+## 6. Contributing 
 
 Contributions are welcome! If you have ideas, improvements, or bug fixes, please open an issue or submit a pull request via the repository’s GitHub page.
 
