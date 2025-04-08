@@ -1287,28 +1287,39 @@ def option_purge_docker():
 # 10. Main Interactive Menu
 # -------------------------------------------------
 
+def option_setup_modsecurity():
+    """
+    New menu option to launch the ModSecurity WAF container setup.
+    """
+    setup_docker_waf()
+
+
 def interactive_menu():
     while True:
         print("\nMenu:")
         print("1: Comprehensive (build new read-only container with host website files)")
         print("2: Pull related Docker container only")
         print("3: Copy website-related files into an existing container")
-        print("4: Exit")
+        print("4: Setup ModSecurity WAF container")  # NEW menu item for modsecurity
         print("5: Purge Docker (destructive: remove all Docker data and uninstall Docker)")
+        print("6: Exit")
         choice = input("Enter your choice: ").strip()
         if choice == "1":
-            option_comprehensive()
+            option_comprehensive()          # assuming this function is defined elsewhere
         elif choice == "2":
-            option_pull_docker()
+            option_pull_docker()            # assuming this function is defined elsewhere
         elif choice == "3":
-            option_copy_website_files()
+            option_copy_website_files()     # assuming this function is defined elsewhere
+        elif choice == "4":
+            option_setup_modsecurity()      # new modsecurity setup option
         elif choice == "5":
             option_purge_docker()
-        elif choice == "4":
+        elif choice == "6":
             print("Exiting.")
             sys.exit(0)
         else:
             print("Invalid choice. Please try again.")
+
 
 
 def main():
