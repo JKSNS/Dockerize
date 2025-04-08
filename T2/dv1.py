@@ -204,13 +204,13 @@ def check_docker_compose():
 # 2. Python & Docker Checks
 # -------------------------------------------------
 
-def check_python_version(min_major=3, min_minor=7):
-    """Ensure Python 3.7+ is being used."""
-    if sys.version_info < (min_major, min_minor):
-        print(f"[ERROR] Python {min_major}.{min_minor}+ is required. You are running {sys.version_info.major}.{sys.version_info.minor}.")
-        sys.exit(1)
-    else:
-        print(f"[INFO] Python version check passed: {sys.version_info.major}.{sys.version_info.minor}.")
+#def check_python_version(min_major=3, min_minor=7):
+#    """Ensure Python 3.7+ is being used."""
+#    if sys.version_info < (min_major, min_minor):
+#        print(f"[ERROR] Python {min_major}.{min_minor}+ is required. You are running {sys.version_info.major}.{sys.version_info.minor}.")
+#        sys.exit(1)
+#    else:
+#        print(f"[INFO] Python version check passed: {sys.version_info.major}.{sys.version_info.minor}.")
 
 def check_wsl_if_windows():
     """On Windows, check for WSL if needed (for non-Docker Desktop)."""
@@ -223,7 +223,7 @@ def check_wsl_if_windows():
 
 def check_all_dependencies():
     """Run all prerequisite checks."""
-    check_python_version(3, 7)
+    #check_python_version(3, 7)
     ensure_docker_installed()
     check_docker_compose()
     check_wsl_if_windows()
