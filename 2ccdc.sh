@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
 ################################################################################
-# deploy_multisite_modsec_waf.sh
+# deploy_modsec_waf.sh
 #
-# This script installs Docker (if needed), prompts the user for multiple websites
-# to protect (domains and their backend addresses), generates a multi-site
-# Nginx reverse-proxy configuration with ModSecurity CRS at Paranoia Level 4,
-# and then launches a single container that can protect all these sites.
+# A script to deploy a single Dockerized ModSecurity WAF (with OWASP CRS) that
+# protects one or more websites running on the same machine on port 80.
 #
-# The WAF container listens on host port 8080 by default, but you can override
-# by setting WAF_HOST_PORT before running:
-#   export WAF_HOST_PORT=8888
-#   ./deploy_multisite_modsec_waf.sh
+# Steps:
+# 1) Detect OS and install Docker if missing.
+# 2) Prompt user for IP/domain of the machine's websites (defaults to 'localhost').
+# 3) Generate a high-security CRS config (Paranoia Level 4).
+# 4) Generate a simple Nginx config inside the WAF container that proxies traffic
+#    from container port 80 to the specified backend (machine:80).
+# 5) Map host port 8080 -> container port 80, so your WAF is accessible on 8080.
 #
-# If you see "Restarting" loops, run:
+# If the container restarts continuously, check logs with:
 #   docker logs modsecurity_waf
-# to see why Nginx is failing. Typical causes are syntax errors or invalid backends.
 ################################################################################
 
 ###############################################################################
-# 0. Ensure we run as root or via sudo
+# 0. Ensure the script runs as root (or via sudo)
 ###############################################################################
 if [[ $EUID -ne 0 ]]; then
     if command -v sudo >/dev/null 2>&1; then
@@ -30,11 +30,12 @@ if [[ $EUID -ne 0 ]]; then
     fi
 fi
 
-set -e  # Abort on error
-echo "[*] Starting multi-site ModSecurity WAF deployment..."
+set -e  # Exit on any error
+
+echo "[*] Starting single-site ModSecurity WAF deployment..."
 
 ###############################################################################
-# 1. Detect OS + Package Manager, Install Docker if needed
+# 1. Detect Linux Distribution, Version, and Package Manager
 ###############################################################################
 OS=""
 OS_VERSION=""
@@ -76,14 +77,17 @@ elif command -v pacman >/dev/null 2>&1; then
     PM="pacman"
 fi
 
-echo "[*] OS: $OS $OS_VERSION, Package manager: $PM"
+echo "[*] Detected OS: $OS $OS_VERSION (PM: $PM)"
 
-echo "[*] Installing Docker if not present..."
+###############################################################################
+# 2. Install Docker if Needed
+###############################################################################
+echo "[*] Installing Docker (if not present)..."
 if [[ "$OS" == "centos" && ${OS_VERSION%%.*} -lt 7 ]]; then
-    # CentOS 6
+    # Legacy CentOS/RHEL 6
     yum install -y epel-release || true
     yum install -y docker-io || {
-        echo "[-] Docker install failed on CentOS6."
+        echo "[-] Docker install failed on CentOS 6."
         exit 1
     }
 else
@@ -91,7 +95,6 @@ else
         apt)
             apt-get update -y
             apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release
-            # Try Docker CE official
             if [[ "$OS" == "ubuntu" || "$OS" == "debian" ]]; then
                 CODENAME="$( (lsb_release -sc 2>/dev/null) || echo "" )"
                 [[ -z "$CODENAME" && "$OS" == "debian" ]] && CODENAME="stable"
@@ -152,13 +155,13 @@ EOF
             }
             ;;
         *)
-            echo "[-] Unsupported package manager. Cannot install Docker."
+            echo "[-] No recognized package manager found. Cannot install Docker."
             exit 1
             ;;
     esac
 fi
 
-# Enable and start Docker
+# Enable + Start Docker
 if command -v systemctl >/dev/null 2>&1; then
     systemctl enable docker.service || true
     systemctl start docker.service
@@ -168,21 +171,21 @@ else
 fi
 
 ###############################################################################
-# 2. Configure Docker group for current user
+# 3. Configure Docker Permissions for Current User
 ###############################################################################
 CURRENT_USER="${SUDO_USER:-$USER}"
 if id -nG "$CURRENT_USER" | grep -qw docker; then
-    echo "[*] $CURRENT_USER already in docker group."
+    echo "[*] User '$CURRENT_USER' is already in the docker group."
 else
-    echo "[*] Adding $CURRENT_USER to docker group..."
+    echo "[*] Adding user '$CURRENT_USER' to docker group..."
     usermod -aG docker "$CURRENT_USER"
-    echo "[*] Re-log or open a new shell so group membership takes effect."
+    echo "[*] Re-log or open a new shell for the group change to take effect."
 fi
 
 ###############################################################################
-# 3. Test Docker with 'hello-world'
+# 4. Verify Docker with 'hello-world'
 ###############################################################################
-echo "[*] Verifying Docker by running 'hello-world'..."
+echo "[*] Testing Docker with 'hello-world'..."
 set +e
 docker run --rm hello-world >/dev/null 2>&1
 HELLO_RESULT=$?
@@ -191,78 +194,54 @@ if [[ $HELLO_RESULT -ne 0 ]]; then
     echo "[!] 'hello-world' test failed. Retrying..."
     sleep 2
     if ! docker run --rm hello-world >/dev/null 2>&1; then
-        echo "[-] Docker not functioning properly."
+        echo "[-] Docker not functioning properly. Exiting."
         exit 1
     fi
 fi
-echo "[*] Docker is working."
+echo "[*] Docker is installed and functional."
 
 ###############################################################################
-# 4. Prompt for Multiple Websites to Protect
+# 5. Prompt for the machine's IP/domain hosting websites on port 80
 ###############################################################################
 echo ""
-echo "=== MULTI-SITE CONFIGURATION ==="
-read -rp "How many websites do you want to protect? " NUM_SITES
-
-# If user cancels or gives invalid input
-if ! [[ $NUM_SITES =~ ^[0-9]+$ ]]; then
-    echo "[-] Invalid number. Exiting."
-    exit 1
-fi
-
-SITES=()
-
-# For each site, gather domain(s) + backend
-for (( i=1; i<=$NUM_SITES; i++ )); do
-    echo ""
-    echo "Configuring site #$i..."
-    read -rp "  Enter the domain name(s), e.g. 'example.com www.example.com': " DOMAINS
-    read -rp "  Enter the backend URL, e.g. 'http://127.0.0.1:8000': " BACKEND
-
-    # We store as "DOMAINS|BACKEND" in an array; we will parse later
-    SITES+=("$DOMAINS|$BACKEND")
-done
+read -rp "Enter the IP or domain name of the machine hosting your site(s) on port 80 [default: localhost]: " WEBSERVER
+WEBSERVER="${WEBSERVER:-localhost}"
+echo "[*] Using backend: http://$WEBSERVER:80"
 
 ###############################################################################
-# 5. Pull the OWASP ModSecurity CRS (Nginx) image
+# 6. Pull the OWASP ModSecurity CRS (Nginx) image
 ###############################################################################
 WAF_IMAGE="owasp/modsecurity-crs:nginx"
-echo "[*] Pulling ModSecurity WAF image: $WAF_IMAGE..."
+echo "[*] Pulling WAF image: $WAF_IMAGE..."
 docker pull "$WAF_IMAGE"
 
 ###############################################################################
-# 6. Create a High-Security CRS config (Paranoia Level 4)
+# 7. Create a High-Security CRS config (Paranoia Level 4)
 ###############################################################################
 MODSEC_DIR="/etc/modsecurity"
 MODSEC_CRS_CONF="$MODSEC_DIR/crs-setup.conf"
 
 mkdir -p "$MODSEC_DIR"
 cat > "$MODSEC_CRS_CONF" << 'EOF'
-# OWASP CRS - High Security
+# OWASP CRS with Paranoia Level 4 (strictest)
 SecAction "id:900000, phase:1, pass, t:none, nolog, setvar:tx.paranoia_level=4"
-SecAction "id:900001, phase:1, pass, t:none, nolog, setvar:tx.blocking_paranoia_level=4, setvar:tx.detection_paranoia_level=4"
-SecAction "id:900010, phase:1, pass, t:none, nolog, setvar:tx.enforce_bodyproc_urlencoded=1"
-SecAction "id:900011, phase:1, pass, t:none, nolog, setvar:tx.crs_validate_utf8_encoding=1"
+SecAction "id:900001, phase:1, pass, t:none, nolog, \
+  setvar:tx.blocking_paranoia_level=4, setvar:tx.detection_paranoia_level=4"
+SecAction "id:900010, phase:1, pass, t:none, nolog, \
+  setvar:tx.enforce_bodyproc_urlencoded=1"
+SecAction "id:900011, phase:1, pass, t:none, nolog, \
+  setvar:tx.crs_validate_utf8_encoding=1"
 SecAction "id:900020, phase:1, pass, t:none, nolog, \
   setvar:tx.inbound_anomaly_score_threshold=5, \
   setvar:tx.outbound_anomaly_score_threshold=4"
 EOF
 
 ###############################################################################
-# 7. Build a Multi-Site Nginx Config that includes ModSecurity
+# 8. Generate a Simple Nginx Config that Proxies to Our Machine:80
 ###############################################################################
-# We'll create a single config file with multiple server blocks. Each block:
-# - listens on port 80 inside container
-# - uses modsecurity at PL4
-# - proxies traffic to the user-specified backend
-# NOTE: We assume each domain is a separate server_name directive.
-
-NGINX_CUSTOM_CONF="/etc/modsecurity/nginx_multisite.conf"
-cat > "$NGINX_CUSTOM_CONF" <<'END_NGINX'
-# Nginx config for multiple websites behind ModSecurity CRS
-# The main modsecurity.conf is included from the container's default locations,
-# but we also include our custom crs-setup.conf to enforce PL4 rules.
-
+NGINX_CUSTOM_CONF="/etc/modsecurity/nginx_single_site.conf"
+cat > "$NGINX_CUSTOM_CONF" <<EOF
+# Nginx reverse proxy config for a single site with ModSecurity enabled
 load_module modules/ngx_http_modsecurity_module.so;
 
 worker_processes auto;
@@ -276,8 +255,7 @@ events {
 http {
   modsecurity on;
   modsecurity_rules_file /etc/modsecurity.d/modsecurity.conf;
-  # The container's base image automatically includes /etc/modsecurity.d/owasp-crs/crs-setup.conf
-  # but we override it by bind-mounting if needed. This is just an extra reference.
+  # The crs-setup.conf is also included from the container's default startup.
 
   include /etc/nginx/mime.types;
   default_type application/octet-stream;
@@ -285,29 +263,15 @@ http {
   sendfile on;
   keepalive_timeout 65;
 
-  # For each site, we'll generate a server block here:
-END_NGINX
-
-# Append a server block for each site
-for SITE_DATA in "${SITES[@]}"; do
-    # Parse the stored "DOMAINS|BACKEND"
-    IFS='|' read -r DOMAINS BACKEND <<< "$SITE_DATA"
-    # Example: server_name example.com www.example.com;
-    cat >> "$NGINX_CUSTOM_CONF" <<END_SERVER
-
   server {
     listen 80;
-    server_name $DOMAINS;
+    server_name localhost;
 
-    # Access logs (optional)
+    # Access logs stored in container => bind-mounted to /var/log/modsecurity
     access_log /var/log/modsecurity/access.log;
 
-    # ModSecurity is enabled globally (modsecurity on; above)
-    # but if you want a site-specific rule, you could do:
-    # modsecurity_rules_file /path/to/custom.conf;
-
     location / {
-      proxy_pass $BACKEND;
+      proxy_pass http://$WEBSERVER:80;
       proxy_http_version 1.1;
       proxy_set_header Host \$host;
       proxy_set_header X-Real-IP \$remote_addr;
@@ -315,41 +279,34 @@ for SITE_DATA in "${SITES[@]}"; do
       proxy_set_header X-Forwarded-Proto \$scheme;
     }
   }
-END_SERVER
-done
-
-# Finish config
-cat >> "$NGINX_CUSTOM_CONF" <<'END_NGINX'
 }
-END_NGINX
-
-echo "[*] Generated multi-site Nginx config: $NGINX_CUSTOM_CONF"
+EOF
 
 ###############################################################################
-# 8. Launch the Container with the Custom Config
+# 9. Launch the Container on Host Port 8080 by Default
 ###############################################################################
 HOST_PORT="${WAF_HOST_PORT:-8080}"
 
-echo "[*] Checking if host port $HOST_PORT is free..."
+# Check if port is free
 if command -v ss >/dev/null 2>&1; then
     if ss -tulpn | grep -q ":$HOST_PORT "; then
-        echo "[-] ERROR: Port $HOST_PORT is already in use. Free it or set WAF_HOST_PORT= another port."
+        echo "[-] ERROR: Port $HOST_PORT is in use. Free it or set WAF_HOST_PORT to another port."
         exit 1
     fi
 elif command -v lsof >/dev/null 2>&1; then
     if lsof -Pi :$HOST_PORT -sTCP:LISTEN >/dev/null 2>&1; then
-        echo "[-] ERROR: Port $HOST_PORT is in use. Free it or set WAF_HOST_PORT= new port."
+        echo "[-] ERROR: Port $HOST_PORT is in use. Free it or set WAF_HOST_PORT to another port."
         exit 1
     fi
 else
-    echo "[!] Could not verify port usage. Proceeding..."
+    echo "[!] WARNING: Could not verify port usage. Proceeding anyway..."
 fi
 
 WAF_CONTAINER_NAME="modsecurity_waf"
 LOG_DIR="/var/log/modsec"
 mkdir -p "$LOG_DIR"
 
-echo "[*] Launching container '$WAF_CONTAINER_NAME' on host port $HOST_PORT..."
+echo "[*] Launching container '$WAF_CONTAINER_NAME' (port $HOST_PORT->80) to proxy to $WEBSERVER:80..."
 docker run -d \
     --name "$WAF_CONTAINER_NAME" \
     --restart unless-stopped \
@@ -359,20 +316,14 @@ docker run -d \
     -v "$LOG_DIR:/var/log/modsecurity:Z" \
     "$WAF_IMAGE"
 
-# Optionally set resource limits
+# Optional resource constraints
 docker update --memory="1g" --cpus="1.0" "$WAF_CONTAINER_NAME" >/dev/null 2>&1 || true
 
 echo ""
-echo "======================================================================"
-echo "[+] Multi-site ModSecurity WAF container launched."
-echo "[+] Listening on port $HOST_PORT -> Container's port 80."
-echo "[+] Virtual hosts generated for the following sites:"
-for SITE_DATA in "${SITES[@]}"; do
-    IFS='|' read -r DOMAINS BACKEND <<< "$SITE_DATA"
-    echo "   - Domains: $DOMAINS -> Backend: $BACKEND"
-done
-echo "[+] Paranoia Level 4, advanced CRS config. Logs at $LOG_DIR on host."
-echo "[i] If the container restarts repeatedly, run:"
-echo "    docker logs modsecurity_waf"
-echo "    to see error messages (typos, invalid upstream, SELinux issues, etc.)"
-echo "======================================================================"
+echo "===================================================================="
+echo "[+] ModSecurity WAF deployed at Paranoia Level 4."
+echo "[+] Listening on port $HOST_PORT (host) -> port 80 (container)."
+echo "[+] All traffic is proxied to http://$WEBSERVER:80."
+echo "[+] Logs are stored in $LOG_DIR on the host."
+echo "[i] If the container restarts, run: docker logs modsecurity_waf"
+echo "===================================================================="
