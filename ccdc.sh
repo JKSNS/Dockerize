@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
 ################################################################################
-# Bash script to deploy a Dockerized ModSecurity WAF with the OWASP Core Rule Set
-# for multiple Linux distributions in incident response / competition scenarios.
+# Bash script to deploy a Dockerized ModSecurity WAF (OWASP CRS) for multiple
+# Linux distributions, with maximum security settings. This version fixes:
 #
-# Fixes / Changes from original version:
-# 1. Enforces running as root (or via sudo), preventing permission errors
-#    during apt-get / yum / dnf / pacman / zypper operations.
-# 2. Minor cleanup of conditionals and fallback logic to improve reliability.
+# 1. Permission errors during Docker install by enforcing root/sudo usage.
+# 2. "bind: address already in use" errors by checking if the host port is taken.
 ################################################################################
 
 # --- Ensure script is run as root (or via sudo) ---
@@ -15,13 +13,12 @@ if [[ $EUID -ne 0 ]]; then
         echo "[*] Script not running as root. Re-running with sudo..."
         exec sudo bash "$0" "$@"
     else
-        echo "[-] Please run this script as root or install 'sudo' to continue."
+        echo "[-] ERROR: Please run this script as root or install 'sudo' to continue."
         exit 1
     fi
 fi
 
-# Abort on any error
-set -e
+set -e  # Abort on any error
 
 echo "[*] Starting Dockerized ModSecurity WAF deployment script..."
 
@@ -31,7 +28,7 @@ echo "[*] Starting Dockerized ModSecurity WAF deployment script..."
 
 OS=""          # OS family (ubuntu, centos, debian, fedora, suse, arch, etc.)
 OS_VERSION=""  # Version number
-PM=""          # Package manager command (apt, yum, dnf, zypper, pacman, ...)
+PM=""          # Package manager (apt, yum, dnf, zypper, pacman, ...)
 
 echo "[*] Detecting Linux distribution..."
 
@@ -81,7 +78,7 @@ echo "[*] Detected OS: $OS $OS_VERSION. Chosen package manager: $PM"
 
 echo "[*] Installing Docker Engine..."
 
-# Special case: CentOS/RHEL 6 (deprecated, uses docker-io from EPEL)
+# Special case: CentOS/RHEL 6 uses older docker-io from EPEL
 if [[ "$OS" == "centos" && ${OS_VERSION%%.*} -lt 7 ]]; then
     echo "[*] CentOS/RHEL 6 detected - installing docker-io from EPEL..."
     yum install -y epel-release || true
@@ -96,26 +93,23 @@ else
             apt-get update -y
             apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release
 
-            # Attempt Docker CE official repo first
+            # Attempt official Docker CE repo first
             if [[ "$OS" == "ubuntu" || "$OS" == "debian" ]]; then
                 CODENAME="$( (lsb_release -sc 2>/dev/null) || echo "" )"
-                # For very old Debian that doesn't have lsb_release, fallback:
                 [[ -z "$CODENAME" && "$OS" == "debian" ]] && CODENAME="stable"
-                
                 curl -fsSL https://download.docker.com/linux/$OS/gpg | apt-key add -
                 echo "deb [arch=$(dpkg --print-architecture)] https://download.docker.com/linux/$OS $CODENAME stable" \
-                  > /etc/apt/sources.list.d/docker.list
-                
+                    > /etc/apt/sources.list.d/docker.list
                 apt-get update -y
                 if ! apt-get install -y docker-ce docker-ce-cli containerd.io; then
-                    echo "[!] Docker CE not available. Falling back to 'docker.io' package..."
+                    echo "[!] Docker CE not available. Falling back to 'docker.io'..."
                     apt-get install -y docker.io || {
                         echo "[-] ERROR: Docker installation failed via apt."
                         exit 1
                     }
                 fi
             else
-                # If not Ubuntu/Debian, fallback to 'docker.io'
+                # Fallback for other apt-based OSes
                 apt-get install -y docker.io || {
                     echo "[-] ERROR: Docker installation failed via apt."
                     exit 1
@@ -126,7 +120,6 @@ else
             echo "[*] Using yum (CentOS/RHEL) to install Docker..."
             yum install -y yum-utils || true
             yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo || {
-                # If yum-config-manager not installed, add repo file manually
                 cat >/etc/yum.repos.d/docker-ce.repo <<'EOF'
 [docker-ce-stable]
 name=Docker CE Stable - $basearch
@@ -166,7 +159,7 @@ EOF
             }
             ;;
         *)
-            echo "[-] ERROR: No supported package manager found. Cannot install Docker."
+            echo "[-] ERROR: No known package manager. Cannot install Docker."
             exit 1
             ;;
     esac
@@ -174,7 +167,7 @@ fi
 
 echo "[*] Enabling and starting Docker service..."
 
-# systemctl-based systems
+# systemctl-based
 if command -v systemctl >/dev/null 2>&1; then
     systemctl enable docker.service || true
     systemctl start docker.service
@@ -188,35 +181,30 @@ fi
 # Section 3: Configure Docker permissions for the current user
 ###############################################################################
 
-# Typically the real user is in $SUDO_USER if script was run via sudo
 CURRENT_USER="${SUDO_USER:-$USER}"
-
 if id -nG "$CURRENT_USER" | grep -qw docker; then
     echo "[*] User '$CURRENT_USER' is already in the docker group."
 else
-    # Add the user to docker group to allow docker usage without sudo
     echo "[*] Adding user '$CURRENT_USER' to 'docker' group..."
     usermod -aG docker "$CURRENT_USER"
-    # Force the group membership to apply to the user’s current session
-    # The simplest approach is to inform the user they must re-log or re-run
-    echo "[*] Docker group membership updated. A re-login or new shell session is required."
+    echo "[*] User group updated. A re-login or new shell is needed for it to take effect."
 fi
 
 ###############################################################################
 # Section 4: Verify Docker installation
 ###############################################################################
 
-echo "[*] Testing Docker with 'hello-world' container..."
+echo "[*] Testing Docker with 'hello-world'..."
 set +e
 docker run --rm hello-world >/dev/null 2>&1
 TEST_RESULT=$?
 set -e
 
 if [[ $TEST_RESULT -ne 0 ]]; then
-    echo "[!] First 'hello-world' test failed. Retrying once..."
+    echo "[!] 'hello-world' test failed once. Retrying..."
     sleep 2
     if ! docker run --rm hello-world >/dev/null 2>&1; then
-        echo "[-] ERROR: Docker does not appear functional. Check installation logs."
+        echo "[-] ERROR: Docker not functioning correctly. Check logs."
         exit 1
     fi
 fi
@@ -227,11 +215,11 @@ echo "[*] Docker is installed and functional."
 ###############################################################################
 
 WAF_IMAGE="owasp/modsecurity-crs:nginx"
-echo "[*] Pulling ModSecurity WAF image: $WAF_IMAGE"
+echo "[*] Pulling WAF image: $WAF_IMAGE..."
 docker pull "$WAF_IMAGE"
 
 ###############################################################################
-# Section 6: Configure the WAF for maximum security (Paranoia Level 4, etc.)
+# Section 6: Configure the WAF (max security: Paranoia Level 4, etc.)
 ###############################################################################
 
 MODSEC_DIR="/etc/modsecurity"
@@ -242,38 +230,49 @@ mkdir -p "$MODSEC_DIR"
 
 cat > "$MODSEC_CRS_CONF" << 'EOF'
 # OWASP CRS maximum security setup
-# Paranoia Level 4 (strictest)
 SecAction "id:900000, phase:1, pass, t:none, nolog, setvar:tx.paranoia_level=4"
-
-# Also set blocking and detection to PL4 (for newer CRS versions)
 SecAction "id:900001, phase:1, pass, t:none, nolog, \
   setvar:tx.blocking_paranoia_level=4, setvar:tx.detection_paranoia_level=4"
-
-# Enforce URLENCODED body processor
-SecAction "id:900010, phase:1, pass, t:none, nolog, setvar:tx.enforce_bodyproc_urlencoded=1"
-
-# Validate UTF-8 encoding
-SecAction "id:900011, phase:1, pass, t:none, nolog, setvar:tx.crs_validate_utf8_encoding=1"
-
-# Adjust inbound/outbound anomaly thresholds
+SecAction "id:900010, phase:1, pass, t:none, nolog, \
+  setvar:tx.enforce_bodyproc_urlencoded=1"
+SecAction "id:900011, phase:1, pass, t:none, nolog, \
+  setvar:tx.crs_validate_utf8_encoding=1"
 SecAction "id:900020, phase:1, pass, t:none, nolog, \
   setvar:tx.inbound_anomaly_score_threshold=5, \
   setvar:tx.outbound_anomaly_score_threshold=4"
 EOF
 
 ###############################################################################
-# Section 7: Run the WAF container with strict resource constraints
+# Section 7: Check if the host port is in use, then run the WAF container
 ###############################################################################
 
+# The user can override the default host port (80) by setting WAF_HOST_PORT=8080, etc.
+HOST_PORT="${WAF_HOST_PORT:-80}"
+
+# Quick check if port is already bound
+if command -v ss >/dev/null 2>&1; then
+    # prefer ss if available
+    if ss -tulpn | grep -q ":$HOST_PORT "; then
+        echo "[-] ERROR: TCP port $HOST_PORT appears to be in use. Free it or set WAF_HOST_PORT to another port, then re-run."
+        exit 1
+    fi
+elif command -v lsof >/dev/null 2>&1; then
+    # fallback to lsof
+    if lsof -Pi :$HOST_PORT -sTCP:LISTEN >/dev/null 2>&1; then
+        echo "[-] ERROR: TCP port $HOST_PORT is already in use. Free it or set WAF_HOST_PORT to a different port, then re-run."
+        exit 1
+    fi
+else
+    echo "[!] WARNING: Could not check port usage (no 'ss' or 'lsof'). Proceeding..."
+fi
+
 WAF_CONTAINER_NAME="modsecurity_waf"
-HOST_PORT=${WAF_HOST_PORT:-80}  # Host port to bind; default to 80 if not set
 
 # Create local log dir for persistent WAF logs
 LOG_DIR="/var/log/modsec"
 mkdir -p "$LOG_DIR"
 
 echo "[*] Launching ModSecurity WAF container '$WAF_CONTAINER_NAME'..."
-
 docker run -d \
     --name "$WAF_CONTAINER_NAME" \
     --restart unless-stopped \
@@ -285,11 +284,11 @@ docker run -d \
     -e MODSEC_AUDIT_ENGINE=RelevantOnly \
     "$WAF_IMAGE"
 
-# (Optional) Apply CPU/RAM limits to protect host from container resource abuse
+# (Optional) Apply CPU/RAM constraints
 docker update --memory="1g" --cpus="1.0" "$WAF_CONTAINER_NAME" >/dev/null 2>&1 || true
 
 echo ""
-echo "[+] ModSecurity WAF container '$WAF_CONTAINER_NAME' deployed successfully."
+echo "[+] ModSecurity WAF container '$WAF_CONTAINER_NAME' deployed."
 echo "[+] Listening on port $HOST_PORT with Paranoia Level 4, full OWASP CRS."
-echo "[+] Logs stored on host at $LOG_DIR."
-echo "[i] If you just added a non-root user to the docker group, please re-log or start a new shell to use Docker without sudo."
+echo "[+] Logs mounted to $LOG_DIR on the host."
+echo "[i] If you just added a non-root user to the 'docker' group, please re-log or open a new shell."
